@@ -6,6 +6,10 @@ import ApiKeys from './pages/ApiKeys';
 import Workers from './pages/Workers';
 import Tasks from './pages/Tasks';
 import RunDetail from './pages/RunDetail';
+import Configs from './pages/Configs';
+import ConfigEditor from './pages/ConfigEditor';
+import TaskEditor from './pages/TaskEditor';
+import RunBatchDetail from './pages/RunBatchDetail';
 
 function AuthShell() {
   const { data: me, isPending } = useMe();
@@ -39,6 +43,12 @@ export default function App() {
       <Route element={<AuthShell />}>
         <Route index element={<Navigate to="/tasks" replace />} />
         <Route path="/tasks" element={<Tasks />} />
+        <Route path="/configs" element={<Configs />} />
+        <Route path="/configs/new" element={<ConfigEditor />} />
+        <Route path="/configs/:id/edit" element={<ConfigEditor />} />
+        <Route path="/tasks/new" element={<TaskEditor />} />
+        <Route path="/tasks/:id/edit" element={<TaskEditor />} />
+        <Route path="/run-batches/:id" element={<RunBatchDetail />} />
         <Route path="/workers" element={<Workers />} />
         <Route path="/keys" element={<ApiKeys />} />
         <Route path="/runs/:id" element={<RunDetail />} />

@@ -1,10 +1,10 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using AutoMapper;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using WebScrape.Data;
 using WebScrape.Data.Dto;
-using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 using WebScrape.Services.Hubs;
 using WebScrape.Services.Interfaces;
 
@@ -15,86 +15,23 @@ public class RunService : IRunService
     private readonly WebScrapeDbContext _db;
     private readonly IMapper _mapper;
     private readonly IWorkerNotifier _notifier;
+    private readonly ILogger<RunService> _log;
 
-    public RunService(WebScrapeDbContext db, IMapper mapper, IWorkerNotifier notifier)
+    public RunService(WebScrapeDbContext db, IMapper mapper, IWorkerNotifier notifier, ILogger<RunService> log)
     {
         _db = db;
         _mapper = mapper;
         _notifier = notifier;
-    }
-
-    public async Task<RunDispatchResult> CreateAndDispatchAsync(Guid userId, Guid taskId, Guid workerId, CancellationToken ct = default)
-    {
-        var worker = await _db.WorkerConnections.FirstOrDefaultAsync(w => w.Id == workerId, ct);
-        if (worker is null) return new(RunDispatchOutcome.NotFound, null, "Worker not found");
-        if (worker.UserId != userId) return new(RunDispatchOutcome.Forbidden, null, "Worker does not belong to user");
-
-        var task = await _db.Tasks
-            .Include(t => t.ScraperConfig)
-            .FirstOrDefaultAsync(t => t.Id == taskId, ct);
-        if (task is null) return new(RunDispatchOutcome.NotFound, null, "Task not found");
-        if (task.UserId != userId) return new(RunDispatchOutcome.Forbidden, null, "Task does not belong to user");
-
-        if (string.IsNullOrEmpty(worker.CurrentConnection))
-            return new(RunDispatchOutcome.WorkerOffline, null, "Worker is offline");
-
-        var connectionId = worker.CurrentConnection;
-        var run = new RunItem
-        {
-            Id = Guid.NewGuid(),
-            TaskId = task.Id,
-            WorkerId = worker.Id,
-            Status = RunItemStatus.Pending,
-            RequestedAt = DateTimeOffset.UtcNow,
-        };
-        _db.RunItems.Add(run);
-        await _db.SaveChangesAsync(ct);
-
-        var config = task.ScraperConfig!;
-        var queueDto = new QueueTaskDto
-        {
-            Id = run.Id.ToString(),
-            ConfigId = config.Id.ToString(),
-            ConfigName = config.Name,
-            SearchTerms = task.SearchTerms.ToList(),
-            Priority = 0,
-            CreatedAt = run.RequestedAt,
-            Status = "pending",
-            InlineConfig = BuildInlineConfig(config),
-        };
-
-        try
-        {
-            await _notifier.SendReceiveTaskAsync(connectionId, queueDto, ct);
-        }
-        catch (Exception ex)
-        {
-            run.Status = RunItemStatus.Failed;
-            run.ErrorMessage = $"Worker disconnected before task could be sent: {ex.Message}";
-            run.CompletedAt = DateTimeOffset.UtcNow;
-            await _db.SaveChangesAsync(CancellationToken.None);
-            return new(RunDispatchOutcome.SendFailed, run.Id, run.ErrorMessage);
-        }
-
-        run.Status = RunItemStatus.Sent;
-        run.SentAt = DateTimeOffset.UtcNow;
-        await _db.SaveChangesAsync(ct);
-
-        return new(RunDispatchOutcome.Created, run.Id, null);
-    }
-
-    // Builds the flat ScraperConfig JSON the extension expects as inlineConfig.
-    // Takes the stored configJson blob and injects "id" at the top level.
-    private static JsonElement BuildInlineConfig(ScraperConfigEntity config)
-    {
-        var node = JsonNode.Parse(config.ConfigJson.RootElement.GetRawText())!.AsObject();
-        node["id"] = config.Id.ToString();
-        return JsonSerializer.SerializeToElement(node);
+        _log = log;
     }
 
     public async Task RecordProgressAsync(TaskProgressDto payload, CancellationToken ct = default)
     {
-        if (!Guid.TryParse(payload.TaskId, out var runId)) return;
+        if (!Guid.TryParse(payload.TaskId, out var runId))
+        {
+            _log.LogWarning("RecordProgress: malformed TaskId {TaskIdPrefix}", Truncate(payload.TaskId));
+            return;
+        }
 
         var run = await _db.RunItems.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
@@ -115,7 +52,11 @@ public class RunService : IRunService
 
     public async Task CompleteAsync(TaskCompleteDto payload, CancellationToken ct = default)
     {
-        if (!Guid.TryParse(payload.TaskId, out var runId)) return;
+        if (!Guid.TryParse(payload.TaskId, out var runId))
+        {
+            _log.LogWarning("Complete: malformed TaskId {TaskIdPrefix}", Truncate(payload.TaskId));
+            return;
+        }
 
         var run = await _db.RunItems.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
@@ -131,7 +72,11 @@ public class RunService : IRunService
 
     public async Task FailAsync(TaskErrorDto payload, CancellationToken ct = default)
     {
-        if (!Guid.TryParse(payload.TaskId, out var runId)) return;
+        if (!Guid.TryParse(payload.TaskId, out var runId))
+        {
+            _log.LogWarning("Fail: malformed TaskId {TaskIdPrefix}", Truncate(payload.TaskId));
+            return;
+        }
 
         var run = await _db.RunItems.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
@@ -145,7 +90,11 @@ public class RunService : IRunService
 
     public async Task MarkPausedAsync(TaskPausedDto payload, CancellationToken ct = default)
     {
-        if (!Guid.TryParse(payload.TaskId, out var runId)) return;
+        if (!Guid.TryParse(payload.TaskId, out var runId))
+        {
+            _log.LogWarning("MarkPaused: malformed TaskId {TaskIdPrefix}", Truncate(payload.TaskId));
+            return;
+        }
 
         var run = await _db.RunItems.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
@@ -166,4 +115,7 @@ public class RunService : IRunService
         if (row.Task is null || row.Task.UserId != userId) return null;
         return _mapper.Map<RunItemDto>(row);
     }
+
+    private static string Truncate(string? s) =>
+        string.IsNullOrEmpty(s) ? "(empty)" : (s.Length <= 8 ? s : s[..8] + "…");
 }

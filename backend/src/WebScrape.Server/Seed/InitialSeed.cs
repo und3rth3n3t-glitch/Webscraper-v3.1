@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using WebScrape.Data;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 
 namespace WebScrape.Server.Seed;
 
@@ -66,18 +67,52 @@ public static class InitialSeed
         };
         db.ScraperConfigs.Add(config);
 
+        var taskId = Guid.NewGuid();
+        var loopBlockId = Guid.NewGuid();
+        var scrapeBlockId = Guid.NewGuid();
+
         var task = new TaskEntity
         {
-            Id = Guid.NewGuid(),
+            Id = taskId,
             UserId = admin.Id,
             Name = DemoTaskName,
-            ScraperConfigId = config.Id,
-            SearchTerms = new[] { "alpha", "beta" },
             CreatedAt = DateTimeOffset.UtcNow,
         };
         db.Tasks.Add(task);
 
+        var loopConfig = JsonDocument.Parse("""
+        {
+            "name": "loop1",
+            "values": ["alpha", "beta"]
+        }
+        """);
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = loopBlockId,
+            TaskId = taskId,
+            ParentBlockId = null,
+            BlockType = BlockType.Loop,
+            OrderIndex = 0,
+            ConfigJsonb = loopConfig,
+        });
+
+        var scrapeConfig = JsonDocument.Parse($$"""
+        {
+            "scraperConfigId": "{{config.Id}}",
+            "stepBindings": {}
+        }
+        """);
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = scrapeBlockId,
+            TaskId = taskId,
+            ParentBlockId = loopBlockId,
+            BlockType = BlockType.Scrape,
+            OrderIndex = 0,
+            ConfigJsonb = scrapeConfig,
+        });
+
         await db.SaveChangesAsync(ct);
-        logger.LogInformation("Seed completed: admin user, demo config {ConfigId}, demo task {TaskId}", config.Id, task.Id);
+        logger.LogInformation("Seed completed: admin user, demo config {ConfigId}, demo task {TaskId} (1-loop-1-scrape tree)", config.Id, task.Id);
     }
 }

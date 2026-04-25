@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from './client';
-import type { AccountDto, CreateApiKeyResponseDto, CreateRunSuccess } from './types';
+import type { AccountDto, BatchDispatchResultDto, CreateApiKeyResponseDto, CreateBatchDto, CreateScraperConfigDto, ExpansionPreviewDto, SaveTaskDto, ScraperConfigDto, TaskDto } from './types';
 
 export function useLogin() {
   const qc = useQueryClient();
@@ -50,11 +50,75 @@ export function useRevokeApiKey() {
   });
 }
 
-export function useStartRun() {
-  const nav = useNavigate();
+export function usePopulateTask() {
   return useMutation({
-    mutationFn: async (body: { taskId: string; workerId: string }) =>
-      (await api.post<CreateRunSuccess>('/api/runs', body)).data,
-    onSuccess: (data) => nav(`/runs/${data.runItemId}`),
+    mutationFn: async (taskId: string): Promise<ExpansionPreviewDto> =>
+      (await api.post(`/api/tasks/${taskId}/populate`)).data,
+  });
+}
+
+export function useCreateBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: CreateBatchDto): Promise<BatchDispatchResultDto> =>
+      (await api.post('/api/runs/batch', body)).data,
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['workers'] }); },
+  });
+}
+
+export function useCreateScraperConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: CreateScraperConfigDto) =>
+      (await api.post<ScraperConfigDto>('/api/scraper-configs', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scraper-configs'] }),
+  });
+}
+
+export function useUpdateScraperConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, body }: { id: string; body: CreateScraperConfigDto }) =>
+      (await api.put<ScraperConfigDto>(`/api/scraper-configs/${id}`, body)).data,
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['scraper-configs'] });
+      qc.invalidateQueries({ queryKey: ['scraper-configs', vars.id] });
+    },
+  });
+}
+
+export function useDeleteScraperConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await api.delete(`/api/scraper-configs/${id}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scraper-configs'] }),
+  });
+}
+
+export function useSaveTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, body }: { id?: string; body: SaveTaskDto }): Promise<TaskDto> => {
+      if (id) {
+        return (await api.put<TaskDto>(`/api/tasks/${id}`, body)).data;
+      }
+      return (await api.post<TaskDto>('/api/tasks', body)).data;
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      if (vars.id) qc.invalidateQueries({ queryKey: ['tasks', vars.id] });
+    },
+  });
+}
+
+export function useDeleteTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await api.delete(`/api/tasks/${id}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }),
   });
 }

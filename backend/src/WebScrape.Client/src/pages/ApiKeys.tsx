@@ -1,14 +1,10 @@
 import { useState } from 'react';
-import axios from 'axios';
 import { useApiKeys } from '../api/queries';
 import { useCreateApiKey, useRevokeApiKey } from '../api/mutations';
 import Modal from '../components/Modal';
 import type { CreateApiKeyResponseDto } from '../api/types';
-
-function fmtDate(s: string | null): string {
-  if (!s) return '—';
-  return new Date(s).toLocaleString();
-}
+import { axiosErrorMessage } from '../utils/errorMessages';
+import { fmtDate } from '../utils/formatDate';
 
 export default function ApiKeys() {
   const { data: keys, isPending } = useApiKeys();
@@ -20,15 +16,7 @@ export default function ApiKeys() {
   const [revealed, setRevealed] = useState<CreateApiKeyResponseDto | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<{ id: string; name: string } | null>(null);
 
-  const createErrMsg = (() => {
-    const e = create.error;
-    if (!e) return null;
-    if (axios.isAxiosError(e)) {
-      const data = e.response?.data as { error?: string } | undefined;
-      return data?.error ?? 'Failed to create key.';
-    }
-    return 'Failed to create key.';
-  })();
+  const createErrMsg = create.error ? axiosErrorMessage(create.error, 'Failed to create key.') : null;
 
   const submit = async () => {
     if (!name.trim()) return;

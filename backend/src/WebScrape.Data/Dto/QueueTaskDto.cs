@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WebScrape.Data.Constants;
 
 namespace WebScrape.Data.Dto;
 
@@ -10,8 +11,11 @@ public class QueueTaskDto
     public List<string> SearchTerms { get; set; } = new();
     public int Priority { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
-    public string Status { get; set; } = "pending";
+    public string Status { get; set; } = RunStatusConstants.Pending;
     // Flat ScraperConfig shape matching the extension's QueueTask.inlineConfig type.
     // Value is configJson blob with "id" injected at top level.
     public JsonElement? InlineConfig { get; set; }
+    // ── M2.3 additions (additive — older extensions ignore unknown fields) ──
+    public string? IterationLabel { get; set; }
+    public Dictionary<string, string>? IterationAssignments { get; set; }
 }

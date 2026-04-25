@@ -234,12 +234,59 @@ namespace WebScrape.Data.Migrations
                     b.ToTable("api_keys", (string)null);
                 });
 
+            modelBuilder.Entity("WebScrape.Data.Entities.RunBatch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("PopulateSnapshot")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("populate_snapshot");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("task_id");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<Guid>("WorkerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("worker_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_run_batches");
+
+                    b.HasIndex("TaskId")
+                        .HasDatabaseName("ix_run_batches_task_id");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_run_batches_user_id");
+
+                    b.HasIndex("WorkerId")
+                        .HasDatabaseName("ix_run_batches_worker_id");
+
+                    b.ToTable("run_batches", (string)null);
+                });
+
             modelBuilder.Entity("WebScrape.Data.Entities.RunItem", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid")
                         .HasColumnName("id");
+
+                    b.Property<Guid?>("BatchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("batch_id");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone")
@@ -256,6 +303,14 @@ namespace WebScrape.Data.Migrations
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text")
                         .HasColumnName("error_message");
+
+                    b.Property<string>("IterationAssignments")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("iteration_assignments");
+
+                    b.Property<string>("IterationLabel")
+                        .HasColumnType("text")
+                        .HasColumnName("iteration_label");
 
                     b.Property<string>("PauseReason")
                         .HasColumnType("text")
@@ -300,6 +355,9 @@ namespace WebScrape.Data.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_run_items");
+
+                    b.HasIndex("BatchId")
+                        .HasDatabaseName("ix_run_items_batch_id");
 
                     b.HasIndex("Status")
                         .HasDatabaseName("ix_run_items_status");
@@ -362,6 +420,47 @@ namespace WebScrape.Data.Migrations
                     b.ToTable("scraper_configs", (string)null);
                 });
 
+            modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("BlockType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("block_type");
+
+                    b.Property<string>("ConfigJsonb")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("config_jsonb");
+
+                    b.Property<int>("OrderIndex")
+                        .HasColumnType("integer")
+                        .HasColumnName("order_index");
+
+                    b.Property<Guid?>("ParentBlockId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("parent_block_id");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("task_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_task_blocks");
+
+                    b.HasIndex("ParentBlockId")
+                        .HasDatabaseName("ix_task_blocks_parent_block_id");
+
+                    b.HasIndex("TaskId", "ParentBlockId", "OrderIndex")
+                        .HasDatabaseName("ix_task_blocks_task_id_parent_block_id_order_index");
+
+                    b.ToTable("task_blocks", (string)null);
+                });
+
             modelBuilder.Entity("WebScrape.Data.Entities.TaskEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -378,24 +477,12 @@ namespace WebScrape.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("name");
 
-                    b.Property<Guid>("ScraperConfigId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("scraper_config_id");
-
-                    b.PrimitiveCollection<string[]>("SearchTerms")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("search_terms");
-
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid")
                         .HasColumnName("user_id");
 
                     b.HasKey("Id")
                         .HasName("pk_tasks");
-
-                    b.HasIndex("ScraperConfigId")
-                        .HasDatabaseName("ix_tasks_scraper_config_id");
 
                     b.HasIndex("UserId")
                         .HasDatabaseName("ix_tasks_user_id");
@@ -604,8 +691,44 @@ namespace WebScrape.Data.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("WebScrape.Data.Entities.RunBatch", b =>
+                {
+                    b.HasOne("WebScrape.Data.Entities.TaskEntity", "Task")
+                        .WithMany()
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_run_batches_tasks_task_id");
+
+                    b.HasOne("WebScrape.Data.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_run_batches_users_user_id");
+
+                    b.HasOne("WebScrape.Data.Entities.WorkerConnection", "Worker")
+                        .WithMany()
+                        .HasForeignKey("WorkerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_run_batches_worker_connections_worker_id");
+
+                    b.Navigation("Task");
+
+                    b.Navigation("User");
+
+                    b.Navigation("Worker");
+                });
+
             modelBuilder.Entity("WebScrape.Data.Entities.RunItem", b =>
                 {
+                    b.HasOne("WebScrape.Data.Entities.RunBatch", "Batch")
+                        .WithMany()
+                        .HasForeignKey("BatchId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_run_items_run_batches_batch_id");
+
                     b.HasOne("WebScrape.Data.Entities.TaskEntity", "Task")
                         .WithMany()
                         .HasForeignKey("TaskId")
@@ -619,6 +742,8 @@ namespace WebScrape.Data.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_run_items_worker_connections_worker_id");
+
+                    b.Navigation("Batch");
 
                     b.Navigation("Task");
 
@@ -637,23 +762,34 @@ namespace WebScrape.Data.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>
+                {
+                    b.HasOne("WebScrape.Data.Entities.TaskBlock", "ParentBlock")
+                        .WithMany("Children")
+                        .HasForeignKey("ParentBlockId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .HasConstraintName("fk_task_blocks_task_blocks_parent_block_id");
+
+                    b.HasOne("WebScrape.Data.Entities.TaskEntity", "Task")
+                        .WithMany("Blocks")
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_task_blocks_tasks_task_id");
+
+                    b.Navigation("ParentBlock");
+
+                    b.Navigation("Task");
+                });
+
             modelBuilder.Entity("WebScrape.Data.Entities.TaskEntity", b =>
                 {
-                    b.HasOne("WebScrape.Data.Entities.ScraperConfigEntity", "ScraperConfig")
-                        .WithMany()
-                        .HasForeignKey("ScraperConfigId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
-                        .HasConstraintName("fk_tasks_scraper_configs_scraper_config_id");
-
                     b.HasOne("WebScrape.Data.Entities.User", "User")
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_tasks_users_user_id");
-
-                    b.Navigation("ScraperConfig");
 
                     b.Navigation("User");
                 });
@@ -677,6 +813,16 @@ namespace WebScrape.Data.Migrations
                     b.Navigation("ApiKey");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>
+                {
+                    b.Navigation("Children");
+                });
+
+            modelBuilder.Entity("WebScrape.Data.Entities.TaskEntity", b =>
+                {
+                    b.Navigation("Blocks");
                 });
 #pragma warning restore 612, 618
         }

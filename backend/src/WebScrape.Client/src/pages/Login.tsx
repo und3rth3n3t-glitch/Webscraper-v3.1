@@ -1,8 +1,8 @@
 import { type FormEvent, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import axios from 'axios';
 import { useLogin } from '../api/mutations';
 import { useMe } from '../api/queries';
+import { axiosErrorMessage } from '../utils/errorMessages';
 
 export default function Login() {
   const [email, setEmail] = useState('admin@local');
@@ -17,15 +17,7 @@ export default function Login() {
     login.mutate({ email, password });
   };
 
-  const errMsg = (() => {
-    const e = login.error;
-    if (!e) return null;
-    if (axios.isAxiosError(e)) {
-      const data = e.response?.data as { error?: string } | undefined;
-      return data?.error ?? 'Sign in failed.';
-    }
-    return 'Sign in failed.';
-  })();
+  const errMsg = login.error ? axiosErrorMessage(login.error, 'Sign in failed.') : null;
 
   return (
     <div className="login-page">

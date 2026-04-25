@@ -77,6 +77,17 @@ builder.Services.AddScoped<IWorkerService, WorkerService>();
 builder.Services.AddScoped<IRunService, RunService>();
 builder.Services.AddScoped<IScraperConfigService, ScraperConfigService>();
 builder.Services.AddScoped<ITaskService, TaskService>();
+builder.Services.AddScoped<ITaskValidator, TaskValidator>();
+builder.Services.AddScoped<IQueueExpansionService>(sp => {
+    var db = sp.GetRequiredService<WebScrapeDbContext>();
+    var scrape = new WebScrape.Services.Expansion.ScrapeBlockExpander();
+    var all = new List<WebScrape.Services.Expansion.IBlockExpander>();
+    var loop = new WebScrape.Services.Expansion.LoopBlockExpander(all);
+    all.Add(loop);
+    all.Add(scrape);
+    return new QueueExpansionService(db, all);
+});
+builder.Services.AddScoped<IRunBatchService, RunBatchService>();
 builder.Services.AddScoped<IWorkerNotifier, ScraperHubWorkerNotifier>();
 
 builder.Services.AddAutoMapper(typeof(AutoMapperProfile));
@@ -85,6 +96,8 @@ builder.Services.AddSignalR()
     .AddJsonProtocol(opts =>
     {
         opts.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        opts.PayloadSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
     });
 
 builder.Services.AddControllers()
@@ -92,6 +105,8 @@ builder.Services.AddControllers()
     {
         opts.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         opts.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+        opts.JsonSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
     });
 
 builder.Services.AddOptions();

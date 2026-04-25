@@ -1,46 +1,35 @@
 import { useState } from 'react';
-import axios from 'axios';
-import { useTasks, useWorkers } from '../api/queries';
-import { useStartRun } from '../api/mutations';
+import { Link, useNavigate } from 'react-router-dom';
+import { useScraperConfigs, useTasks } from '../api/queries';
+import { useDeleteTask } from '../api/mutations';
 import Modal from '../components/Modal';
+import PopulatePreviewModal from '../components/PopulatePreviewModal';
 import type { TaskDto } from '../api/types';
+import { configNameFor } from '../utils/configLookup';
 
 export default function Tasks() {
   const { data: tasks, isPending } = useTasks();
-  const { data: workers } = useWorkers();
-  const startRun = useStartRun();
+  const { data: configs } = useScraperConfigs();
+  const remove = useDeleteTask();
+  const nav = useNavigate();
 
-  const [picking, setPicking] = useState<TaskDto | null>(null);
-  const [workerId, setWorkerId] = useState<string>('');
+  const [confirmDelete, setConfirmDelete] = useState<TaskDto | null>(null);
+  const [runTask, setRunTask] = useState<TaskDto | null>(null);
 
-  const onlineWorkers = (workers ?? []).filter((w) => w.online);
-
-  const openPicker = (t: TaskDto) => {
-    setPicking(t);
-    setWorkerId(onlineWorkers[0]?.id ?? '');
-    startRun.reset();
+  const doDelete = async () => {
+    if (!confirmDelete) return;
+    await remove.mutateAsync(confirmDelete.id);
+    setConfirmDelete(null);
   };
-
-  const submit = async () => {
-    if (!picking || !workerId) return;
-    await startRun.mutateAsync({ taskId: picking.id, workerId });
-    setPicking(null);
-  };
-
-  const errMsg = (() => {
-    const e = startRun.error;
-    if (!e) return null;
-    if (axios.isAxiosError(e)) {
-      const data = e.response?.data as { error?: string } | undefined;
-      return data?.error ?? 'Could not start the run.';
-    }
-    return 'Could not start the run.';
-  })();
 
   return (
     <div className="view">
-      <h2 className="view-title">Tasks</h2>
-      <div className="view-subtitle">Pick a task and send it to an online worker.</div>
+      <div className="view-header-row" style={{ justifyContent: 'space-between' }}>
+        <h2 className="view-title">Tasks</h2>
+        <button className="btn btn-primary" onClick={() => nav('/tasks/new')}>
+          + New task
+        </button>
+      </div>
 
       {isPending && <div className="loading-state">Loading…</div>}
 
@@ -48,74 +37,73 @@ export default function Tasks() {
         <div className="empty-state">
           <div className="empty-state-title">No tasks yet</div>
           <div className="empty-state-desc">
-            Tasks come from the seeded data or the task editor (coming in M2).
+            Create one to start scraping. A task is one loop of values feeding one scraper config.
           </div>
         </div>
       )}
 
       {!isPending && tasks && tasks.length > 0 && (
         <div className="config-list">
-          {tasks.map((t) => (
-            <div key={t.id} className="card list-card config-card">
-              <div className="config-card-header">
-                <div className="config-card-name">{t.name}</div>
-                <button className="btn btn-primary btn-sm" onClick={() => openPicker(t)}>
-                  Run on…
-                </button>
+          {tasks.map((t) => {
+            const configName = configNameFor(t, configs);
+            return (
+              <div key={t.id} className="card list-card config-card">
+                <div className="config-card-header">
+                  <div className="config-card-name">{t.name}</div>
+                  <div style={{ display: 'flex', gap: 'var(--spacing-xs)' }}>
+                    <Link to={`/tasks/${t.id}/edit`} className="btn btn-secondary btn-sm">Edit</Link>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => setConfirmDelete(t)}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => setRunTask(t)}
+                    >
+                      Run batch…
+                    </button>
+                  </div>
+                </div>
+                <div className="config-card-meta">
+                  {configName ? (
+                    <span className="domain-badge">{configName}</span>
+                  ) : (
+                    <span className="meta-badge">No config</span>
+                  )}
+                  <span className="meta-badge">
+                    {t.searchTerms.length} value{t.searchTerms.length === 1 ? '' : 's'}
+                  </span>
+                </div>
               </div>
-              <div className="config-card-meta">
-                <span className="domain-badge">{t.scraperConfigName}</span>
-                <span className="meta-badge">
-                  {t.searchTerms.length} term{t.searchTerms.length === 1 ? '' : 's'}
-                </span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       <Modal
-        open={!!picking}
-        onClose={() => setPicking(null)}
-        title={`Run "${picking?.name ?? ''}"`}
+        open={!!confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        title="Delete this task?"
       >
-        {errMsg && <div className="danger-banner">{errMsg}</div>}
-        <div className="form-group">
-          <label className="form-label" htmlFor="worker-pick">
-            Worker
-          </label>
-          {onlineWorkers.length === 0 ? (
-            <div className="form-hint text-danger">
-              No workers are online right now. Connect a browser extension first.
-            </div>
-          ) : (
-            <select
-              id="worker-pick"
-              className="form-select"
-              value={workerId}
-              onChange={(e) => setWorkerId(e.target.value)}
-            >
-              {onlineWorkers.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-          )}
+        <div className="modal-body">
+          Delete <strong>{confirmDelete?.name}</strong>? This can't be undone.
         </div>
         <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={() => setPicking(null)}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={submit}
-            disabled={startRun.isPending || !workerId}
-          >
-            {startRun.isPending ? 'Starting…' : 'Run'}
+          <button className="btn btn-ghost" onClick={() => setConfirmDelete(null)}>Cancel</button>
+          <button className="btn btn-danger" onClick={doDelete} disabled={remove.isPending}>
+            {remove.isPending ? 'Deleting…' : 'Delete'}
           </button>
         </div>
       </Modal>
+
+      {runTask && (
+        <PopulatePreviewModal
+          task={runTask}
+          onClose={() => setRunTask(null)}
+        />
+      )}
     </div>
   );
 }

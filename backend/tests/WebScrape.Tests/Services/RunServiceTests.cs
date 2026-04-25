@@ -1,8 +1,10 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using WebScrape.Data.Dto;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 using WebScrape.Services.Hubs;
 using WebScrape.Services.Implementations;
 using WebScrape.Services.Interfaces;
@@ -13,36 +15,20 @@ namespace WebScrape.Tests.Services;
 
 public class RunServiceTests
 {
-    private static async Task<(RunService svc, WebScrape.Data.WebScrapeDbContext db, Mock<IWorkerNotifier> notifier, Guid userId, TaskEntity task, WorkerConnection worker)> Build(bool workerOnline = true)
+    private static async Task<(RunService svc, WebScrape.Data.WebScrapeDbContext db, Guid userId, TaskEntity task, WorkerConnection worker)> Build()
     {
         var db = TestDb.CreateInMemory();
         var notifier = new Mock<IWorkerNotifier>(MockBehavior.Strict);
-        var svc = new RunService(db, TestDb.CreateMapper(), notifier.Object);
+        var svc = new RunService(db, TestDb.CreateMapper(), notifier.Object, NullLogger<RunService>.Instance);
 
         var user = new User { Id = Guid.NewGuid(), UserName = "u@x", Email = "u@x" };
         db.Users.Add(user);
-
-        var config = new ScraperConfigEntity
-        {
-            Id = Guid.NewGuid(),
-            UserId = user.Id,
-            Name = "demo",
-            Domain = "example.com",
-            ConfigJson = JsonDocument.Parse("""{"steps":[]}"""),
-            SchemaVersion = 3,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        };
-        db.ScraperConfigs.Add(config);
 
         var task = new TaskEntity
         {
             Id = Guid.NewGuid(),
             UserId = user.Id,
             Name = "t",
-            ScraperConfigId = config.Id,
-            ScraperConfig = config,
-            SearchTerms = new[] { "alpha", "beta" },
             CreatedAt = DateTimeOffset.UtcNow,
         };
         db.Tasks.Add(task);
@@ -53,89 +39,41 @@ public class RunServiceTests
             UserId = user.Id,
             Name = "w",
             ApiKeyId = Guid.NewGuid(),
-            CurrentConnection = workerOnline ? "conn-1" : null,
+            CurrentConnection = "conn-1",
         };
         db.WorkerConnections.Add(worker);
 
         await db.SaveChangesAsync();
-        return (svc, db, notifier, user.Id, task, worker);
+        return (svc, db, user.Id, task, worker);
     }
 
-    [Fact]
-    public async Task CreateAndDispatch_sends_to_hub_and_marks_run_sent()
+    private static async Task<Guid> SeedSentRun(WebScrape.Data.WebScrapeDbContext db, Guid taskId, Guid workerId)
     {
-        var (svc, db, notifier, userId, task, worker) = await Build(workerOnline: true);
-        notifier.Setup(n => n.SendReceiveTaskAsync(worker.CurrentConnection!, It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-
-        var result = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-
-        Assert.Equal(RunDispatchOutcome.Created, result.Outcome);
-        Assert.NotNull(result.RunItemId);
-        notifier.Verify(n => n.SendReceiveTaskAsync(
-            worker.CurrentConnection!,
-            It.Is<QueueTaskDto>(q => q.SearchTerms.Count == 2 && q.InlineConfig != null),
-            It.IsAny<CancellationToken>()), Times.Once);
-
-        var stored = await db.RunItems.SingleAsync(r => r.Id == result.RunItemId);
-        Assert.Equal(RunItemStatus.Sent, stored.Status);
-        Assert.NotNull(stored.SentAt);
-    }
-
-    [Fact]
-    public async Task CreateAndDispatch_returns_offline_when_worker_has_no_connection()
-    {
-        var (svc, db, notifier, userId, task, worker) = await Build(workerOnline: false);
-
-        var result = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-
-        Assert.Equal(RunDispatchOutcome.WorkerOffline, result.Outcome);
-        Assert.Null(result.RunItemId);
-        Assert.Equal(0, await db.RunItems.CountAsync());
-        notifier.VerifyNoOtherCalls();
-    }
-
-    [Fact]
-    public async Task CreateAndDispatch_returns_forbidden_for_other_users_worker()
-    {
-        var (svc, db, notifier, _, task, worker) = await Build(workerOnline: true);
-        var otherUser = Guid.NewGuid();
-
-        var result = await svc.CreateAndDispatchAsync(otherUser, task.Id, worker.Id);
-
-        Assert.Equal(RunDispatchOutcome.Forbidden, result.Outcome);
-        Assert.Equal(0, await db.RunItems.CountAsync());
-        notifier.VerifyNoOtherCalls();
-    }
-
-    [Fact]
-    public async Task CreateAndDispatch_marks_failed_when_hub_send_throws()
-    {
-        var (svc, db, notifier, userId, task, worker) = await Build(workerOnline: true);
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("connection gone"));
-
-        var result = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-
-        Assert.Equal(RunDispatchOutcome.SendFailed, result.Outcome);
-        Assert.NotNull(result.RunItemId);
-        var stored = await db.RunItems.SingleAsync(r => r.Id == result.RunItemId);
-        Assert.Equal(RunItemStatus.Failed, stored.Status);
-        Assert.Contains("connection gone", stored.ErrorMessage);
-        Assert.NotNull(stored.CompletedAt);
+        var run = new RunItem
+        {
+            Id = Guid.NewGuid(),
+            TaskId = taskId,
+            WorkerId = workerId,
+            BatchId = null,
+            Status = RunItemStatus.Sent,
+            RequestedAt = DateTimeOffset.UtcNow,
+            SentAt = DateTimeOffset.UtcNow,
+        };
+        db.RunItems.Add(run);
+        await db.SaveChangesAsync();
+        return run.Id;
     }
 
     [Fact]
     public async Task RecordProgress_transitions_sent_to_running_and_stores_metrics()
     {
-        var (svc, db, notifier, userId, task, worker) = await Build();
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var dispatch = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-        var runId = dispatch.RunItemId!.Value;
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
 
         await svc.RecordProgressAsync(new TaskProgressDto
         {
             TaskId = runId.ToString(),
-            ConfigId = task.ScraperConfigId.ToString(),
+            ConfigId = "",
             CurrentTerm = "alpha",
             CurrentStep = "click-search",
             Progress = 50,
@@ -154,20 +92,18 @@ public class RunServiceTests
     [Fact]
     public async Task Complete_persists_result_jsonb_and_completes()
     {
-        var (svc, db, notifier, userId, task, worker) = await Build();
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var dispatch = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-        var runId = dispatch.RunItemId!.Value;
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
 
         await svc.CompleteAsync(new TaskCompleteDto
         {
             TaskId = runId.ToString(),
-            ConfigId = task.ScraperConfigId.ToString(),
+            ConfigId = "",
             CompletedAt = DateTimeOffset.UtcNow,
             Result = new TaskResultDto
             {
                 TaskId = runId.ToString(),
-                ConfigId = task.ScraperConfigId.ToString(),
+                ConfigId = "",
                 ConfigName = "demo",
                 Status = "success",
                 Iterations = JsonDocument.Parse("[]").RootElement,
@@ -185,15 +121,13 @@ public class RunServiceTests
     [Fact]
     public async Task Fail_sets_failed_status_with_error()
     {
-        var (svc, db, notifier, userId, task, worker) = await Build();
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var dispatch = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-        var runId = dispatch.RunItemId!.Value;
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
 
         await svc.FailAsync(new TaskErrorDto
         {
             TaskId = runId.ToString(),
-            ConfigId = task.ScraperConfigId.ToString(),
+            ConfigId = "",
             Error = "timeout",
             StepLabel = "click-search",
             FailedAt = DateTimeOffset.UtcNow,
@@ -208,15 +142,13 @@ public class RunServiceTests
     [Fact]
     public async Task MarkPaused_sets_status_and_reason()
     {
-        var (svc, db, notifier, userId, task, worker) = await Build();
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var dispatch = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-        var runId = dispatch.RunItemId!.Value;
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
 
         await svc.MarkPausedAsync(new TaskPausedDto
         {
             TaskId = runId.ToString(),
-            ConfigId = task.ScraperConfigId.ToString(),
+            ConfigId = "",
             Reason = "cloudflare",
             ChallengeType = "managed",
             PausedAt = DateTimeOffset.UtcNow,
@@ -230,10 +162,8 @@ public class RunServiceTests
     [Fact]
     public async Task Get_returns_null_for_other_users_run()
     {
-        var (svc, db, notifier, userId, task, worker) = await Build();
-        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var dispatch = await svc.CreateAndDispatchAsync(userId, task.Id, worker.Id);
-        var runId = dispatch.RunItemId!.Value;
+        var (svc, db, userId, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
 
         var asOther = await svc.GetAsync(Guid.NewGuid(), runId);
         Assert.Null(asOther);

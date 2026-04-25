@@ -1,24 +1,15 @@
 using System.Text.Json;
+using WebScrape.Data.Enums;
 
 namespace WebScrape.Data.Entities;
-
-public static class RunItemStatus
-{
-    public const string Pending = "pending";
-    public const string Sent = "sent";
-    public const string Running = "running";
-    public const string Paused = "paused";
-    public const string Completed = "completed";
-    public const string Failed = "failed";
-    public const string Cancelled = "cancelled";
-}
 
 public class RunItem
 {
     public Guid Id { get; set; }
     public Guid TaskId { get; set; }
     public Guid WorkerId { get; set; }
-    public string Status { get; set; } = RunItemStatus.Pending;
+    public Guid? BatchId { get; set; }
+    public RunItemStatus Status { get; set; } = RunItemStatus.Pending;
     public DateTimeOffset RequestedAt { get; set; }
     public DateTimeOffset? SentAt { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
@@ -30,6 +21,9 @@ public class RunItem
     public string? CurrentTerm { get; set; }
     public string? CurrentStep { get; set; }
     public string? Phase { get; set; }
+    public string? IterationLabel { get; set; }
+    public JsonDocument? IterationAssignments { get; set; }
     public TaskEntity? Task { get; set; }
     public WorkerConnection? Worker { get; set; }
+    public RunBatch? Batch { get; set; }
 }

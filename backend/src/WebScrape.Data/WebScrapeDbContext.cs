@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 
 namespace WebScrape.Data;
 
@@ -16,8 +17,10 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
     public DbSet<ApiKey> ApiKeys => Set<ApiKey>();
     public DbSet<ScraperConfigEntity> ScraperConfigs => Set<ScraperConfigEntity>();
     public DbSet<TaskEntity> Tasks => Set<TaskEntity>();
+    public DbSet<TaskBlock> TaskBlocks => Set<TaskBlock>();
     public DbSet<WorkerConnection> WorkerConnections => Set<WorkerConnection>();
     public DbSet<RunItem> RunItems => Set<RunItem>();
+    public DbSet<RunBatch> RunBatches => Set<RunBatch>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -55,9 +58,18 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.Name).IsRequired();
-            e.Property(x => x.SearchTerms).HasColumnType("text[]").IsRequired();
             e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
-            e.HasOne(x => x.ScraperConfig).WithMany().HasForeignKey(x => x.ScraperConfigId).OnDelete(DeleteBehavior.Restrict);
+            e.HasMany(x => x.Blocks).WithOne(x => x.Task!).HasForeignKey(x => x.TaskId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TaskBlock>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.BlockType).HasConversion<string>().IsRequired();
+            e.Property(x => x.OrderIndex).IsRequired();
+            e.Property(x => x.ConfigJsonb).HasColumnType("jsonb").HasConversion(jsonConverter).IsRequired();
+            e.HasOne(x => x.ParentBlock).WithMany(x => x.Children).HasForeignKey(x => x.ParentBlockId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.TaskId, x.ParentBlockId, x.OrderIndex });
         });
 
         builder.Entity<WorkerConnection>(e =>
@@ -69,15 +81,27 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
             e.HasIndex(x => x.CurrentConnection);
         });
 
+        builder.Entity<RunBatch>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.PopulateSnapshot).HasColumnType("jsonb").HasConversion(jsonConverter).IsRequired();
+            e.HasOne(x => x.Task).WithMany().HasForeignKey(x => x.TaskId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.Worker).WithMany().HasForeignKey(x => x.WorkerId).OnDelete(DeleteBehavior.Restrict);
+        });
+
         builder.Entity<RunItem>(e =>
         {
             e.HasKey(x => x.Id);
-            e.Property(x => x.Status).IsRequired();
+            e.Property(x => x.Status).HasConversion<string>().IsRequired();
             e.Property(x => x.ResultJsonb).HasColumnType("jsonb").HasConversion(nullableJsonConverter);
+            e.Property(x => x.IterationAssignments).HasColumnType("jsonb").HasConversion(nullableJsonConverter);
             e.HasOne(x => x.Task).WithMany().HasForeignKey(x => x.TaskId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Worker).WithMany().HasForeignKey(x => x.WorkerId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.Batch).WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.SetNull);
             e.HasIndex(x => new { x.TaskId, x.RequestedAt });
             e.HasIndex(x => x.Status);
+            e.HasIndex(x => x.BatchId);
         });
     }
 }

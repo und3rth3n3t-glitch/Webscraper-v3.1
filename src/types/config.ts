@@ -44,6 +44,8 @@ export interface SetInputOptions {
   waitAfterMs: number;
   isInitialInput: boolean;
   alternateSelector: SelectorDescriptor | null;
+  // Server-set at populate time; takes precedence over searchTerm at runtime.
+  literalValue?: string;
 }
 
 export interface ClickOptions {

@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -68,9 +67,9 @@ public class AccountController : ControllerBase
     [Authorize(AuthenticationSchemes = WebScrapeSchemes.Cookie)]
     public async Task<IActionResult> Me()
     {
-        var idClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (!Guid.TryParse(idClaim, out var id)) return Unauthorized();
-        var user = await _userManager.FindByIdAsync(id.ToString());
+        var id = User.TryGetUserId();
+        if (id is null) return Unauthorized();
+        var user = await _userManager.FindByIdAsync(id.Value.ToString());
         if (user is null) return Unauthorized();
         return Ok(new AccountDto { Id = user.Id, Email = user.Email ?? "", Name = user.UserName });
     }

@@ -1,22 +1,14 @@
 import { useParams, Link } from 'react-router-dom';
 import { useRun } from '../api/queries';
+import { RunItemStatus } from '../api/types';
 import type { RunStatus } from '../api/types';
-
-const STATUS_LABELS: Record<RunStatus, string> = {
-  pending: 'Waiting to send',
-  sent: 'Sent to worker',
-  running: 'Running',
-  paused: 'Paused — solve the challenge in your browser',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
+import { statusLabel } from '../utils/runStatus';
 
 const BANNER_CLASS: Partial<Record<RunStatus, string>> = {
-  completed: 'run-banner-success',
-  failed: 'run-banner-error',
-  cancelled: 'run-banner-error',
-  paused: 'run-banner-warning',
+  [RunItemStatus.Completed]: 'run-banner-success',
+  [RunItemStatus.Failed]:    'run-banner-error',
+  [RunItemStatus.Cancelled]: 'run-banner-error',
+  [RunItemStatus.Paused]:    'run-banner-warning',
 };
 
 export default function RunDetail() {
@@ -53,11 +45,11 @@ export default function RunDetail() {
 
       {bannerClass ? (
         <div className={`run-banner ${bannerClass}`}>
-          {STATUS_LABELS[run.status]}
+          {statusLabel(run.status)}
           {run.errorMessage ? ` — ${run.errorMessage}` : ''}
         </div>
       ) : (
-        <div className="view-subtitle">{STATUS_LABELS[run.status]}</div>
+        <div className="view-subtitle">{statusLabel(run.status)}</div>
       )}
 
       <div className="run-progress-bar-wrap">

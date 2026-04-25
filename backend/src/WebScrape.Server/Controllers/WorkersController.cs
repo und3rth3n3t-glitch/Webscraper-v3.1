@@ -1,6 +1,4 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using WebScrape.Server.Auth;
 using WebScrape.Services.Interfaces;
@@ -22,7 +20,6 @@ public class WorkersController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
     {
-        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-        return Ok(await _workers.ListAsync(userId, ct));
+        return Ok(await _workers.ListAsync(User.GetUserId(), ct));
     }
 }

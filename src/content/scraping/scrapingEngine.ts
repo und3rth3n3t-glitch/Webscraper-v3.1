@@ -398,13 +398,16 @@ async function executeSetInput(
     step.label || 'input',
   );
 
-  onProgress?.(`Typing "${searchTerm ?? ''}" into ${step.label || 'input field'}`);
+  // Precedence: server-set literalValue > per-iteration searchTerm > empty string.
+  const valueToType = opts.literalValue ?? searchTerm ?? '';
+
+  onProgress?.(`Typing "${valueToType}" into ${step.label || 'input field'}`);
 
   if (opts.clearBefore !== false) {
     await clearInput(el);
   }
 
-  await typeText(el, searchTerm ?? '');
+  await typeText(el, valueToType);
 
   if (opts.pressEnterAfter) {
     await randomDelay(100, 300);

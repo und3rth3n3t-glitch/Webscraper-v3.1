@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 using WebScrape.Services.Implementations;
 using WebScrape.Tests.TestSupport;
 using Xunit;

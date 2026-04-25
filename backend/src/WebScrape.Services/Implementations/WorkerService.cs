@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using WebScrape.Data;
 using WebScrape.Data.Dto;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 using WebScrape.Services.Interfaces;
 
 namespace WebScrape.Services.Implementations;

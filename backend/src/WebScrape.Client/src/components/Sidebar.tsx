@@ -8,6 +8,9 @@ export default function Sidebar() {
       <NavLink to="/tasks" className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}>
         Tasks
       </NavLink>
+      <NavLink to="/configs" className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}>
+        Configs
+      </NavLink>
       <NavLink to="/workers" className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}>
         Workers
       </NavLink>

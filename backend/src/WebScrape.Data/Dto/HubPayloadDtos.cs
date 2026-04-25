@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WebScrape.Data.Constants;
 
 namespace WebScrape.Data.Dto;
 
@@ -9,7 +10,7 @@ public class TaskProgressDto
     public string CurrentTerm { get; set; } = "";
     public string CurrentStep { get; set; } = "";
     public int Progress { get; set; }
-    public string Phase { get; set; } = "loop";
+    public string Phase { get; set; } = PhaseConstants.Loop;
 }
 
 public class TaskCompleteDto
@@ -25,7 +26,7 @@ public class TaskResultDto
     public string TaskId { get; set; } = "";
     public string ConfigId { get; set; } = "";
     public string ConfigName { get; set; } = "";
-    public string Status { get; set; } = "success";
+    public string Status { get; set; } = "";
     public JsonElement Iterations { get; set; }
     public JsonElement? DataMapping { get; set; }
     public int TotalTimeMs { get; set; }
@@ -45,7 +46,7 @@ public class TaskPausedDto
 {
     public string TaskId { get; set; } = "";
     public string ConfigId { get; set; } = "";
-    public string Reason { get; set; } = "cloudflare";
+    public string Reason { get; set; } = PauseReasonConstants.Cloudflare;
     public string ChallengeType { get; set; } = "";
     public DateTimeOffset PausedAt { get; set; }
 }

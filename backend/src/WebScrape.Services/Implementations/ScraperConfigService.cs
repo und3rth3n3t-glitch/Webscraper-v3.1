@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using WebScrape.Data;
 using WebScrape.Data.Dto;
 using WebScrape.Data.Entities;
+using WebScrape.Data.Enums;
 using WebScrape.Services.Interfaces;
 
 namespace WebScrape.Services.Implementations;
@@ -67,5 +68,36 @@ public class ScraperConfigService : IScraperConfigService
 
         await _db.SaveChangesAsync(ct);
         return _mapper.Map<ScraperConfigDto>(entity);
+    }
+
+    public async Task<DeleteScraperConfigResult> DeleteAsync(Guid userId, Guid id, CancellationToken ct = default)
+    {
+        var entity = await _db.ScraperConfigs.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (entity is null)
+            return new DeleteScraperConfigResult(DeleteScraperConfigOutcome.NotFound, 0);
+        if (entity.UserId != userId)
+            return new DeleteScraperConfigResult(DeleteScraperConfigOutcome.Forbidden, 0);
+
+        // Reference check: JSONB scraperConfigId inside scrape blocks.
+        // JSONB column has a HasConversion to string which the InMemory provider can't coerce
+        // in a server-side LIKE. Materialise scrape blocks and filter in memory; the GUID is
+        // a unique token so a substring match is safe, and block counts are small per user.
+        var idAsString = id.ToString();
+        var scrapeBlockTaskIds = (await _db.TaskBlocks
+            .Where(b => b.BlockType == BlockType.Scrape)
+            .Select(b => new { b.TaskId, b.ConfigJsonb })
+            .ToListAsync(ct))
+            .Where(b => b.ConfigJsonb.RootElement.GetRawText().Contains(idAsString))
+            .Select(b => b.TaskId)
+            .Distinct()
+            .ToList();
+
+        var referencingTaskCount = scrapeBlockTaskIds.Count;
+        if (referencingTaskCount > 0)
+            return new DeleteScraperConfigResult(DeleteScraperConfigOutcome.Referenced, referencingTaskCount);
+
+        _db.ScraperConfigs.Remove(entity);
+        await _db.SaveChangesAsync(ct);
+        return new DeleteScraperConfigResult(DeleteScraperConfigOutcome.Deleted, 0);
     }
 }

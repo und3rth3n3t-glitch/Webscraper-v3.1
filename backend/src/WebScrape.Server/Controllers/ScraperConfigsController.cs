@@ -1,6 +1,4 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using WebScrape.Data.Dto;
 using WebScrape.Server.Auth;
@@ -23,15 +21,13 @@ public class ScraperConfigsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
     {
-        var userId = GetUserId();
-        return Ok(await _configs.ListAsync(userId, ct));
+        return Ok(await _configs.ListAsync(User.GetUserId(), ct));
     }
 
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
     {
-        var userId = GetUserId();
-        var dto = await _configs.GetAsync(userId, id, ct);
+        var dto = await _configs.GetAsync(User.GetUserId(), id, ct);
         return dto is null ? NotFound() : Ok(dto);
     }
 
@@ -39,8 +35,7 @@ public class ScraperConfigsController : ControllerBase
     [CookieCsrf]
     public async Task<IActionResult> Create([FromBody] CreateScraperConfigDto dto, CancellationToken ct)
     {
-        var userId = GetUserId();
-        var created = await _configs.CreateAsync(userId, dto, ct);
+        var created = await _configs.CreateAsync(User.GetUserId(), dto, ct);
         return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
     }
 
@@ -48,10 +43,28 @@ public class ScraperConfigsController : ControllerBase
     [CookieCsrf]
     public async Task<IActionResult> Update(Guid id, [FromBody] CreateScraperConfigDto dto, CancellationToken ct)
     {
-        var userId = GetUserId();
-        var updated = await _configs.UpdateAsync(userId, id, dto, ct);
+        var updated = await _configs.UpdateAsync(User.GetUserId(), id, dto, ct);
         return updated is null ? NotFound() : Ok(updated);
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    [HttpDelete("{id:guid}")]
+    [CookieCsrf]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
+    {
+        var result = await _configs.DeleteAsync(User.GetUserId(), id, ct);
+        return result.Outcome switch
+        {
+            DeleteScraperConfigOutcome.Deleted   => NoContent(),
+            DeleteScraperConfigOutcome.NotFound  => NotFound(),
+            DeleteScraperConfigOutcome.Forbidden => StatusCode(StatusCodes.Status403Forbidden),
+            DeleteScraperConfigOutcome.Referenced => Conflict(new
+            {
+                code = "CONFIG_REFERENCED",
+                referencingTaskCount = result.ReferencingTaskCount,
+                error = $"This config is used by {result.ReferencingTaskCount} task{(result.ReferencingTaskCount == 1 ? "" : "s")}. Delete or update those tasks first.",
+            }),
+            _ => StatusCode(StatusCodes.Status500InternalServerError),
+        };
+    }
+
 }

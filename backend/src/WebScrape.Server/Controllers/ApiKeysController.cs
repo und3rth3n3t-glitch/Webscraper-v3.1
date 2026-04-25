@@ -1,6 +1,4 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using WebScrape.Data.Dto;
 using WebScrape.Server.Auth;
@@ -25,16 +23,14 @@ public class ApiKeysController : ControllerBase
     public async Task<IActionResult> Create([FromBody] CreateApiKeyDto dto, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(dto.Name)) return BadRequest(new { error = "Name is required" });
-        var userId = GetUserId();
-        var created = await _apiKeys.CreateAsync(userId, dto.Name, ct);
+        var created = await _apiKeys.CreateAsync(User.GetUserId(), dto.Name, ct);
         return Ok(created);
     }
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
     {
-        var userId = GetUserId();
-        var list = await _apiKeys.ListAsync(userId, ct);
+        var list = await _apiKeys.ListAsync(User.GetUserId(), ct);
         return Ok(list);
     }
 
@@ -42,11 +38,8 @@ public class ApiKeysController : ControllerBase
     [CookieCsrf]
     public async Task<IActionResult> Revoke(Guid id, CancellationToken ct)
     {
-        var userId = GetUserId();
-        var ok = await _apiKeys.RevokeAsync(userId, id, ct);
+        var ok = await _apiKeys.RevokeAsync(User.GetUserId(), id, ct);
         if (!ok) return NotFound();
         return NoContent();
     }
-
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 }

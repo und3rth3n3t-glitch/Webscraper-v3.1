@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.DependencyInjection;
+using Moq;
 using WebScrape.Data.Entities;
 using WebScrape.Server.Auth;
 using WebScrape.Services.Security;
@@ -39,7 +41,8 @@ public class PatAuthenticationHandlerTests
 
         var options = new OptionsWrapper<PatAuthenticationOptions>(new PatAuthenticationOptions());
         var optionsMonitor = new TestOptionsMonitor<PatAuthenticationOptions>(options.Value);
-        var handler = new PatAuthenticationHandler(optionsMonitor, NullLoggerFactory.Instance, UrlEncoder.Default, db, hasher, tokens);
+        var mockScopeFactory = new Mock<IServiceScopeFactory>();
+        var handler = new PatAuthenticationHandler(optionsMonitor, NullLoggerFactory.Instance, UrlEncoder.Default, db, hasher, tokens, mockScopeFactory.Object);
 
         var http = new DefaultHttpContext();
         await handler.InitializeAsync(new AuthenticationScheme(PatAuthenticationOptions.Scheme, null, typeof(PatAuthenticationHandler)), http);
