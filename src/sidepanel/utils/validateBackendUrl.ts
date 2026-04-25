@@ -11,7 +11,8 @@ export function validateBackendUrl(raw: string): UrlValidation {
   } catch {
     return { valid: false, error: "That doesn't look like a valid URL." };
   }
-  if (url.protocol !== 'https:') {
+  const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocalhost)) {
     return { valid: false, error: 'URL must start with https://' };
   }
   return { valid: true };

@@ -1,5 +1,5 @@
 import type { IterationResult } from './extraction';
-import type { DataMapping } from './config';
+import type { DataMapping, ScraperConfig } from './config';
 
 export interface QueueTask {
   id: string;
@@ -12,6 +12,7 @@ export interface QueueTask {
   pausedReason?: 'cloudflare';
   result?: TaskResult;
   error?: string;
+  inlineConfig?: ScraperConfig;
 }
 
 export interface TaskProgress {

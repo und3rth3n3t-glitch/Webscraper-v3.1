@@ -1,8 +1,29 @@
+import type { QueueTask } from '../types/signalr';
+import { getAllConfigs, saveConfig } from '../sidepanel/utils/storage';
+import { resolveQueueTask, ConfigNotFoundError } from '../background/remoteTaskHandler';
+import {
+  mapFlowProgress, mapFlowComplete, mapFlowError, mapFlowPaused,
+  type ActiveTaskContext, type FlowProgressPayload, type FlowCompletePayload,
+  type FlowErrorPayload, type FlowPausedPayload,
+} from '../background/flowEventToHubPayload';
+
 export default defineBackground(() => {
   const frameRegistry = new Map<number, Map<number, { url: string; isTop: boolean }>>();
   const pendingContinuations = new Map<number, unknown>();
   let lastFocusedTabId: number | null = null;
   let offscreenCreated = false;
+  let offscreenReady = false;
+  const offscreenReadyResolvers: Array<() => void> = [];
+
+  function waitForOffscreenReady(): Promise<void> {
+    if (offscreenReady) return Promise.resolve();
+    return new Promise(resolve => offscreenReadyResolvers.push(resolve));
+  }
+
+  // ── Remote queue state ──
+
+  let activeRemoteTask: (ActiveTaskContext & { tabId: number }) | null = null;
+  const pendingRemoteTasks: QueueTask[] = [];
 
   // ── Offscreen document (Chrome-only) ──
 
@@ -21,6 +42,11 @@ export default defineBackground(() => {
         reasons: [offscreen.Reason.BLOBS],
         justification: 'Maintain SignalR WebSocket connection for task queue',
       });
+      // offscreenReady will be set when OFFSCREEN_READY arrives from the new document
+    } else {
+      // SW restarted but offscreen persists — listener is already registered
+      offscreenReady = true;
+      offscreenReadyResolvers.splice(0).forEach(r => r());
     }
     offscreenCreated = true;
   }
@@ -57,6 +83,141 @@ export default defineBackground(() => {
     lastFocusedTabId = tabId;
   });
 
+  // ── Remote task helpers ──
+
+  function waitForTabComplete(tabId: number): Promise<void> {
+    return new Promise((resolve) => {
+      const listener = (id: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+        if (id === tabId && changeInfo.status === 'complete') {
+          browser.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      };
+      browser.tabs.onUpdated.addListener(listener);
+      browser.tabs.get(tabId).then((t) => {
+        if (t.status === 'complete') {
+          browser.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      }).catch(() => { /* tab gone */ });
+    });
+  }
+
+  function relayHubInvocation(type: string, payload: unknown): void {
+    const send = async () => {
+      await ensureOffscreen();
+      await waitForOffscreenReady();
+      // Same _fromSW tag the sidepanel relay uses — offscreen filters out
+      // anything missing this flag (see messageHandler.ts).
+      await browser.runtime.sendMessage({ type, payload, _fromSW: true });
+    };
+    send().catch((err) => console.error('[SW] Failed to relay hub invocation:', err));
+  }
+
+  async function startRemoteTask(task: QueueTask): Promise<void> {
+    let resolved;
+    try {
+      const localConfigs = await getAllConfigs();
+      resolved = resolveQueueTask(task, localConfigs);
+
+      // Persist inline config if it isn't local yet — first-run cache.
+      if (task.inlineConfig && !localConfigs.some((c) => c.id === task.configId)) {
+        await saveConfig(task.inlineConfig);
+      }
+    } catch (err) {
+      const message = err instanceof ConfigNotFoundError ? err.message : (err as Error).message;
+      relayHubInvocation('SEND_TASK_ERROR', {
+        taskId: task.id,
+        configId: task.configId,
+        error: message,
+        failedAt: new Date().toISOString(),
+      });
+      drainNextRemoteTask();
+      return;
+    }
+
+    const tab = await browser.tabs.create({ url: resolved.config.url, active: true });
+    if (!tab.id) {
+      relayHubInvocation('SEND_TASK_ERROR', {
+        taskId: task.id,
+        configId: task.configId,
+        error: "Couldn't open a tab for the task",
+        failedAt: new Date().toISOString(),
+      });
+      drainNextRemoteTask();
+      return;
+    }
+
+    activeRemoteTask = {
+      tabId: tab.id,
+      taskId: resolved.taskId,
+      configId: resolved.configId,
+      configName: resolved.configName,
+      searchTerms: resolved.searchTerms,
+      dataMapping: resolved.config.dataMapping,
+    };
+    lastFocusedTabId = tab.id;
+
+    await waitForTabComplete(tab.id);
+
+    browser.tabs.sendMessage(tab.id, {
+      type: 'EXECUTE_FLOW',
+      payload: {
+        config: resolved.config,
+        searchTerms: resolved.searchTerms,
+        taskId: resolved.taskId,
+      },
+    }).catch((err: Error) => {
+      relayHubInvocation('SEND_TASK_ERROR', {
+        taskId: resolved.taskId,
+        configId: resolved.configId,
+        error: `Couldn't dispatch task to page: ${err.message}`,
+        failedAt: new Date().toISOString(),
+      });
+      activeRemoteTask = null;
+      drainNextRemoteTask();
+    });
+  }
+
+  function drainNextRemoteTask(): void {
+    activeRemoteTask = null;
+    const next = pendingRemoteTasks.shift();
+    if (next) {
+      startRemoteTask(next).catch((err) => console.error('[SW] Failed to start queued task:', err));
+    }
+  }
+
+  function handleRemoteFlowEvent(type: string, payload: Record<string, unknown>): void {
+    if (!activeRemoteTask || payload?.taskId !== activeRemoteTask.taskId) return;
+
+    switch (type) {
+      case 'FLOW_PROGRESS': {
+        const hubPayload = mapFlowProgress(activeRemoteTask, payload as unknown as FlowProgressPayload);
+        relayHubInvocation('SEND_TASK_PROGRESS', hubPayload);
+        return;
+      }
+      case 'FLOW_COMPLETE': {
+        const hubPayload = mapFlowComplete(activeRemoteTask, payload as unknown as FlowCompletePayload);
+        relayHubInvocation('SEND_TASK_COMPLETE', hubPayload);
+        drainNextRemoteTask();
+        return;
+      }
+      case 'FLOW_ERROR': {
+        const hubPayload = mapFlowError(activeRemoteTask, payload as unknown as FlowErrorPayload);
+        relayHubInvocation('SEND_TASK_ERROR', hubPayload);
+        drainNextRemoteTask();
+        return;
+      }
+      case 'FLOW_PAUSED': {
+        const flowPayload = payload as { reason?: string; challengeType?: string };
+        if (flowPayload.reason !== 'cloudflare') return; // M1 only forwards Cloudflare
+        const hubPayload = mapFlowPaused(activeRemoteTask, payload as unknown as FlowPausedPayload);
+        relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
+        return;
+      }
+    }
+  }
+
   // ── Message routing ──
 
   browser.runtime.onMessage.addListener((
@@ -67,6 +228,12 @@ export default defineBackground(() => {
     const message = rawMessage as Record<string, unknown>;
     const sender = rawSender as chrome.runtime.MessageSender;
     const type = message.type as string;
+
+    if (type === 'OFFSCREEN_READY') {
+      offscreenReady = true;
+      offscreenReadyResolvers.splice(0).forEach(r => r());
+      return;
+    }
 
     if (type === 'REGISTER_CONTINUATION') {
       const tabId = sender.tab?.id;
@@ -113,10 +280,25 @@ export default defineBackground(() => {
       return true as const;
     }
 
+    // ── Inbound queue task: start or queue it ──
+
+    if (type === 'TASK_RECEIVED') {
+      const task = message.payload as QueueTask;
+      // Mirror to sidepanel so the queue tab can render it.
+      browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
+      if (activeRemoteTask) {
+        pendingRemoteTasks.push(task);
+      } else {
+        startRemoteTask(task).catch((err) => console.error('[SW] startRemoteTask failed:', err));
+      }
+      return true as const;
+    }
+
     // ── Offscreen → Sidepanel relay ──
 
     const offscreenToSidepanel = [
-      'TASK_RECEIVED', 'RESUME_TASK', 'CANCEL_TASK', 'CONNECTION_READY', 'CONNECTION_LOST',
+      'RESUME_TASK', 'CANCEL_TASK', 'CONNECTION_READY', 'CONNECTION_LOST',
+      'CONNECTION_STATUS',
     ];
     if (offscreenToSidepanel.includes(type)) {
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
@@ -126,17 +308,32 @@ export default defineBackground(() => {
     // ── Sidepanel → Offscreen relay ──
 
     const sidepanelToOffscreen = [
-      'INIT_SIGNALR', 'SEND_TASK_PROGRESS', 'SEND_TASK_COMPLETE',
+      'INIT_SIGNALR', 'STOP_SIGNALR',
+      'SEND_TASK_PROGRESS', 'SEND_TASK_COMPLETE',
       'SEND_TASK_ERROR', 'SEND_TASK_PAUSED', 'GET_CONNECTION_STATUS',
     ];
     if (sidepanelToOffscreen.includes(type)) {
-      ensureOffscreen()
-        .then(() => browser.runtime.sendMessage(message))
-        .catch(console.error);
+      console.log('[SW] Relaying to offscreen:', type);
+      const relay = async () => {
+        await ensureOffscreen();
+        await waitForOffscreenReady();
+        // Tag the relay so the offscreen can ignore direct sidepanel broadcasts
+        // of the same message (runtime.sendMessage is a broadcast to all contexts).
+        return browser.runtime.sendMessage({ ...(message as object), _fromSW: true });
+      };
+      relay()
+        .then((response) => {
+          console.log('[SW] Relay response for', type, response);
+          sendResponse(response);
+        })
+        .catch((err: Error) => {
+          console.error('[SW] Offscreen relay error:', err);
+          sendResponse({ ok: false, error: err.message });
+        });
       return true;
     }
 
-    // ── Content → Sidepanel relay ──
+    // ── Content → Sidepanel relay (also taps queue mode forwarding) ──
 
     const contentToSidepanel = [
       'ELEMENT_PICKED', 'ELEMENT_HOVER', 'PICKER_CANCELLED', 'PONG',
@@ -147,6 +344,7 @@ export default defineBackground(() => {
     ];
     if (contentToSidepanel.includes(type)) {
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
+      handleRemoteFlowEvent(type, (message.payload ?? {}) as Record<string, unknown>);
       return true as const;
     }
 
@@ -201,6 +399,15 @@ export default defineBackground(() => {
   browser.tabs.onRemoved.addListener((tabId: number) => {
     frameRegistry.delete(tabId);
     pendingContinuations.delete(tabId);
+    if (activeRemoteTask && activeRemoteTask.tabId === tabId) {
+      relayHubInvocation('SEND_TASK_ERROR', {
+        taskId: activeRemoteTask.taskId,
+        configId: activeRemoteTask.configId,
+        error: 'Task tab was closed',
+        failedAt: new Date().toISOString(),
+      });
+      drainNextRemoteTask();
+    }
   });
 
   browser.tabs.onUpdated.addListener((tabId: number, changeInfo: { status?: string }) => {

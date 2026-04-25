@@ -13,11 +13,27 @@ import DomainBadge from './components/DomainBadge';
 import CloudflarePauseAlert from './components/CloudflarePauseAlert';
 import { useUiStore } from './stores/uiStore';
 import { useConfigStore } from './stores/configStore';
+import { useSettingsStore } from './stores/settingsStore';
 import { getPageInfo } from './utils/messaging';
 import { startDispatcher } from './utils/messageDispatcher';
+import type { ConnectionStatus } from '../types/messages';
 
 export default function App() {
   useEffect(() => { startDispatcher(); }, []);
+
+  useEffect(() => {
+    // CONNECTION_STATUS comes from the offscreen document (not a tab), so it must
+    // be caught with a raw listener — onMessage/onContentMessage filters for sender.tab.
+    const listener = (message: unknown) => {
+      const msg = message as { type?: string; payload?: unknown };
+      if (msg.type === 'CONNECTION_STATUS') {
+        const payload = msg.payload as { status: ConnectionStatus; error?: string };
+        useSettingsStore.getState().setConnectionStatus(payload.status, payload.error);
+      }
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
+  }, []);
 
   const activeTab = useUiStore((s) => s.activeTab);
   const setActiveTab = useUiStore((s) => s.setActiveTab);

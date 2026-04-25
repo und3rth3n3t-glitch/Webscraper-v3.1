@@ -36,8 +36,11 @@ export type SidepanelToContentMessage =
 
 // ── SW ↔ Offscreen ────────────────────────────────────────────────────────────
 
+export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+
 export type SwToOffscreenMessage =
-  | { type: 'INIT_SIGNALR';           payload: { serverUrl: string; token: string; clientId: string } }
+  | { type: 'INIT_SIGNALR';           payload: { serverUrl: string; token: string; clientId: string; version: string } }
+  | { type: 'STOP_SIGNALR' }
   | { type: 'SEND_TASK_PROGRESS';     payload: TaskProgress }
   | { type: 'SEND_TASK_COMPLETE';     payload: TaskComplete }
   | { type: 'SEND_TASK_ERROR';        payload: TaskError }
@@ -50,4 +53,4 @@ export type OffscreenToSwMessage =
   | { type: 'TASK_RECEIVED';          payload: QueueTask }
   | { type: 'RESUME_TASK';            payload: { taskId: string } }
   | { type: 'CANCEL_TASK';            payload: { taskId: string } }
-  | { type: 'CONNECTION_STATUS';      payload: { connected: boolean; serverUrl: string | null } };
+  | { type: 'CONNECTION_STATUS';      payload: { status: ConnectionStatus; error?: string } };

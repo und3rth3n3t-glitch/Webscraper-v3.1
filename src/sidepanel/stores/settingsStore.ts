@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import type { ConnectionStatus } from '../../types/messages';
 
 interface SettingsState {
   serverUrl: string;
@@ -8,11 +9,17 @@ interface SettingsState {
   connected: boolean;
   lastConnectionError: string | null;
   pauseOnCloudflare: boolean;
+  mode: 'local' | 'queue';
+  workerName: string;
+  connectionStatus: ConnectionStatus;
 
   setConnection: (url: string, token: string) => void;
   setConnected: (connected: boolean, error?: string) => void;
   setPauseOnCloudflare: (v: boolean) => void;
   clearToken: () => void;
+  setMode: (mode: 'local' | 'queue') => void;
+  setWorkerName: (name: string) => void;
+  setConnectionStatus: (status: ConnectionStatus, error?: string) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -23,6 +30,9 @@ export const useSettingsStore = create<SettingsState>()(
       connected: false,
       lastConnectionError: null,
       pauseOnCloudflare: true,
+      mode: 'local',
+      workerName: 'My Browser',
+      connectionStatus: 'idle',
 
       setConnection: (serverUrl, jwtToken) =>
         set({ serverUrl, jwtToken, connected: false, lastConnectionError: null }),
@@ -33,12 +43,28 @@ export const useSettingsStore = create<SettingsState>()(
       setPauseOnCloudflare: (pauseOnCloudflare) => set({ pauseOnCloudflare }),
 
       clearToken: () => set({ jwtToken: '', connected: false }),
+
+      setMode: (mode) => set({ mode }),
+
+      setWorkerName: (workerName) => set({ workerName }),
+
+      setConnectionStatus: (connectionStatus, error) =>
+        set({
+          connectionStatus,
+          lastConnectionError: error ?? null,
+          connected: connectionStatus === 'connected',
+        }),
     }),
     {
       name: 'bb-settings',
       storage: createJSONStorage(() => localStorage),
       // Exclude jwtToken from localStorage — stored securely in chrome.storage.local
-      partialize: (s) => ({ serverUrl: s.serverUrl, pauseOnCloudflare: s.pauseOnCloudflare }),
+      partialize: (s) => ({
+        serverUrl: s.serverUrl,
+        pauseOnCloudflare: s.pauseOnCloudflare,
+        mode: s.mode,
+        workerName: s.workerName,
+      }),
     },
   ),
 );

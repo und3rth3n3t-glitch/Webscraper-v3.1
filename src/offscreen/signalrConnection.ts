@@ -1,16 +1,26 @@
 import * as signalR from '@microsoft/signalr';
 import type { QueueTask } from '../types/signalr';
 
+type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+
 export class ScraperHubConnection {
   private connection: signalR.HubConnection | null = null;
   private clientId = '';
+  private extensionVersion = '';
 
-  async connect(serverUrl: string, token: string, clientId: string): Promise<void> {
+  async connect(serverUrl: string, token: string, clientId: string, version: string): Promise<void> {
+    this.extensionVersion = version;
+    if (this.connection) {
+      try { await this.connection.stop(); } catch { /* expected */ }
+      this.connection = null;
+    }
+
     this.clientId = clientId;
+    this.emitStatus('connecting');
 
     this.connection = new signalR.HubConnectionBuilder()
       .withUrl(`${serverUrl}/api/scraper-hub`, {
-        headers: { Authorization: `Bearer ${token}` },
+        accessTokenFactory: () => token,
       })
       .withAutomaticReconnect({
         nextRetryDelayInMilliseconds: (ctx) => {
@@ -33,26 +43,45 @@ export class ScraperHubConnection {
       browser.runtime.sendMessage({ type: 'CANCEL_TASK', payload: { taskId } });
     });
 
+    this.connection.onreconnecting(() => {
+      this.emitStatus('reconnecting');
+    });
+
     this.connection.onreconnected(() => {
+      this.emitStatus('connected');
       this.connection!
-        .invoke('RegisterWorker', this.clientId, browser.runtime.getManifest().version)
-        .catch(console.error);
+        .invoke('RegisterWorker', this.clientId, this.extensionVersion)
+        .catch((err) => console.error('[SignalR] RegisterWorker after reconnect failed:', err));
     });
 
     this.connection.onclose((err) => {
+      const message = err ? String((err as Error).message ?? err) : 'closed';
+      this.emitStatus('error', message);
       browser.runtime.sendMessage({
         type: 'CONNECTION_LOST',
-        payload: { error: String(err ?? 'closed') },
+        payload: { error: message },
       });
     });
 
-    await this.connection.start();
-    await this.connection.invoke(
-      'RegisterWorker',
-      clientId,
-      browser.runtime.getManifest().version,
-    );
+    try {
+      await this.connection.start();
+    } catch (err) {
+      const message = (err as Error).message ?? 'Connection failed';
+      this.emitStatus('error', message);
+      this.connection = null;
+      throw err;
+    }
+
+    this.emitStatus('connected');
     browser.runtime.sendMessage({ type: 'CONNECTION_READY', payload: { clientId } });
+
+    // RegisterWorker updates the backend DB — fire without blocking the connect promise.
+    console.log('[SignalR] Invoking RegisterWorker', { clientId, version, state: this.connection.state });
+    this.connection.invoke('RegisterWorker', clientId, version)
+      .then(() => console.log('[SignalR] RegisterWorker succeeded'))
+      .catch((err) => {
+        console.error('[SignalR] RegisterWorker failed:', err);
+      });
   }
 
   async invoke(method: string, ...args: unknown[]): Promise<void> {
@@ -64,7 +93,20 @@ export class ScraperHubConnection {
     return this.connection?.state === signalR.HubConnectionState.Connected;
   }
 
-  disconnect(): void {
-    this.connection?.stop();
+  async disconnect(): Promise<void> {
+    if (!this.connection) {
+      this.emitStatus('idle');
+      return;
+    }
+    try { await this.connection.stop(); } catch { /* expected */ }
+    this.connection = null;
+    this.emitStatus('idle');
+  }
+
+  private emitStatus(status: ConnectionStatus, error?: string): void {
+    browser.runtime.sendMessage({
+      type: 'CONNECTION_STATUS',
+      payload: { status, error },
+    }).catch(() => { /* sidepanel may be closed */ });
   }
 }
