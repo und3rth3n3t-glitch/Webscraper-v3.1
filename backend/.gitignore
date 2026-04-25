@@ -1,0 +1,29 @@
+# build output
+bin/
+obj/
+out/
+*.user
+
+# IDE
+.vs/
+.idea/
+*.swp
+
+# logs
+logs/
+*.log
+
+# secrets
+src/WebScrape.Server/appsettings.Development.json
+src/WebScrape.Server/appsettings.Local.json
+.env
+.env.local
+
+# node (frontend lives here in M1.3)
+node_modules/
+dist/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
