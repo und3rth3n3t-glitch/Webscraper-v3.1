@@ -11,7 +11,7 @@ export interface ScrapingResult {
 export interface IterationResult {
   searchTerm: string | null;
   data: Record<string, unknown>[];
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'skipped';
   error?: string;
   pageUrls?: string[];
 }

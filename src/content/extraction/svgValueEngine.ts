@@ -171,17 +171,34 @@ export function parseAxisLabel(text: string): { value: number; isPercent: boolea
     s = s.slice(0, -1).trimEnd();
   }
 
-  const match = s.match(/^([+-]?[\d.]+)\s*([kmbtKMBT]?)$/);
-  if (!match) return null;
+  let numStr: string;
+  let suffix: string;
 
-  const num = parseFloat(match[1]);
+  // Strict path: number + optional magnitude letter + end-of-string.
+  const strict = s.match(/^([+-]?[\d.]+)\s*([kmbtKMBT]?)$/);
+  if (strict) {
+    numStr = strict[1];
+    suffix = strict[2] || '';
+  } else {
+    // Permissive path: number followed by whitespace and a non-numeric unit
+    // (e.g. "0 °C", "25 mm", "100 USD"). The unit is silently ignored.
+    // Magnitude letters (k/m/b/t) are NOT detected in this branch — too
+    // ambiguous when followed by other letters (e.g. "25mm" is millimetres,
+    // not 25 million).
+    const lead = s.match(/^([+-]?[\d.]+)\s+[^\d.\s]/);
+    if (!lead) return null;
+    numStr = lead[1];
+    suffix = '';
+  }
+
+  const num = parseFloat(numStr);
   if (!Number.isFinite(num)) return null;
 
-  const suffix = (match[2] || '').toLowerCase();
+  const lower = suffix.toLowerCase();
   let multiplier = 1;
-  if (suffix === 'k') multiplier = 1_000;
-  else if (suffix === 'm') multiplier = 1_000_000;
-  else if (suffix === 'b' || suffix === 't') multiplier = 1_000_000_000;
+  if (lower === 'k') multiplier = 1_000;
+  else if (lower === 'm') multiplier = 1_000_000;
+  else if (lower === 'b' || lower === 't') multiplier = 1_000_000_000;
 
   return { value: num * multiplier, isPercent };
 }
@@ -359,14 +376,9 @@ function barRectToPoint(
     ? bbox.top + bbox.height / 2 - svgRect.top
     : bbox.left + bbox.width / 2 - svgRect.left;
 
-  let value: number | null = null;
-  if (isHorizontal) {
-    const rightX = bbox.right - svgRect.left;
-    value = xScale ? xScale(rightX) : null;
-  } else {
-    const topY = bbox.top - svgRect.top;
-    value = yScale ? yScale(topY) : null;
-  }
+  const value: number | null = isHorizontal
+    ? (xScale ? xScale(bbox.right - svgRect.left) : null)
+    : (yScale ? yScale(bbox.top - svgRect.top) : null);
 
   if (value === null || !Number.isFinite(value)) return null;
 

@@ -97,8 +97,23 @@ export default defineContentScript({
       previousIterations?: [];
     };
 
+    // Messages that must only run in the top frame. Without this guard,
+    // every iframe (e.g. Adobe AudienceManager tracking iframes injected by
+    // many sites) receives broadcast tabs.sendMessage calls and runs them
+    // against its own document, producing wrong results that can overwrite
+    // the top frame's output.
+    const TOP_FRAME_ONLY = new Set(['EXECUTE_FLOW', 'SCAN_ELEMENTS', 'GET_PAGE_INFO']);
+
+    // Per-frame scan abort flag. Set true on SCAN_ABORT; checked between
+    // expand-clicks and per-element work in SCAN_ELEMENTS.
+    let scanAbortSignal = false;
+
     browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const { type, payload } = message as { type: string; payload: Record<string, unknown> };
+
+      if (TOP_FRAME_ONLY.has(type) && window !== window.top) {
+        return true; // Subframe — silently no-op; top frame's sendResponse will win.
+      }
 
       switch (type) {
         case 'PING':
@@ -117,7 +132,7 @@ export default defineContentScript({
           break;
 
         case 'START_PICKER':
-          startPicker((payload?.mode as 'single' | 'allSimilar' | 'container') || 'single', payload || {});
+          startPicker((payload?.mode as 'single' | 'allSimilar' | 'container') || 'single');
           sendResponse({ ok: true });
           break;
 
@@ -155,6 +170,11 @@ export default defineContentScript({
           sendResponse({ ok: true });
           break;
 
+        case 'SCAN_ABORT':
+          scanAbortSignal = true;
+          sendResponse({ ok: true });
+          break;
+
         case 'RESUME_AFTER_CLOUDFLARE':
           // Handled internally by scrapingEngine via onMessage listener
           break;
@@ -188,19 +208,50 @@ export default defineContentScript({
         case 'SCAN_ELEMENTS': {
           const { scanType, expand } = payload as { scanType: string; expand?: boolean };
 
+          scanAbortSignal = false;
+
+          const sendProgress = (msg: string): void => {
+            try {
+              browser.runtime.sendMessage({ type: 'SCAN_PROGRESS', payload: { message: msg } });
+            } catch { /* expected */ }
+          };
+
+          const sendAborted = (): void => {
+            try {
+              browser.runtime.sendMessage({
+                type: 'SCAN_COMPLETE',
+                payload: { elements: [], scanType, found: 0, aborted: true },
+              });
+            } catch { /* expected */ }
+          };
+
           (async () => {
             try {
-              if (expand) await expandHiddenElements();
+              if (expand) {
+                sendProgress('Expanding hidden sections...');
+                await expandHiddenElements({
+                  isAborted: () => scanAbortSignal,
+                  onProgress: sendProgress,
+                });
+                if (scanAbortSignal) { sendAborted(); return; }
+              }
 
               const results: Array<Record<string, unknown>> = [];
 
               if (scanType === 'table') {
+                sendProgress('Looking for tables...');
                 const tableEls = new Set<Element>();
                 for (const el of document.querySelectorAll(TABLE_FRAMEWORK_SELECTORS)) {
                   if (detectElementType(el as HTMLElement) === 'table') tableEls.add(el);
                 }
                 deduplicateNested(tableEls);
+
+                const total = tableEls.size;
+                let i = 0;
                 for (const el of tableEls) {
+                  if (scanAbortSignal) { sendAborted(); return; }
+                  i++;
+                  sendProgress(`Analyzing table ${i} of ${total}...`);
                   try {
                     const descriptor = generateSelectorDescriptor(el);
                     results.push({
@@ -216,8 +267,10 @@ export default defineContentScript({
                   } catch { /* expected */ }
                 }
               } else if (scanType === 'chart') {
+                sendProgress('Looking for charts...');
                 const seen = new Set<Element>();
                 for (const sel of CHART_SELECTORS) {
+                  if (scanAbortSignal) { sendAborted(); return; }
                   let nodeList: NodeListOf<Element>;
                   try { nodeList = document.querySelectorAll(sel); } catch { continue; }
                   for (const el of nodeList) {
@@ -231,7 +284,13 @@ export default defineContentScript({
                   }
                 }
                 deduplicateNested(seen);
+
+                const total = seen.size;
+                let i = 0;
                 for (const el of seen) {
+                  if (scanAbortSignal) { sendAborted(); return; }
+                  i++;
+                  sendProgress(`Analyzing chart ${i} of ${total}...`);
                   try {
                     const descriptor = generateSelectorDescriptor(el);
                     const chartMethod = await detectChartExtractionMethod(el as HTMLElement);

@@ -40,11 +40,10 @@ class NetworkRecorder {
   }
 
   private patchFetch(): void {
-    const self = this;
     const original = this.originalFetch;
 
     const proxy = new Proxy(original, {
-      apply(target, thisArg, args: Parameters<typeof fetch>) {
+      apply: (target, thisArg, args: Parameters<typeof fetch>) => {
         const req = args[0];
         const url =
           typeof req === 'string'
@@ -55,14 +54,14 @@ class NetworkRecorder {
         const method = (req instanceof Request ? req.method : 'GET').toUpperCase();
 
         return Reflect.apply(target, thisArg, args).then(async (response: Response) => {
-          if (self.active) {
+          if (this.active) {
             const clone = response.clone();
             const ct = clone.headers.get('content-type') ?? '';
             if (ct.includes('application/json')) {
               clone
                 .json()
                 .then((body: unknown) => {
-                  self.emit({
+                  this.emit({
                     id: crypto.randomUUID(),
                     url,
                     method,
@@ -89,7 +88,9 @@ class NetworkRecorder {
   }
 
   private patchXhr(): void {
-    const self = this;
+    const isActive = () => this.active;
+    const emit = this.emit.bind(this);
+    const { originalXhrOpen, originalXhrSend } = this;
 
     type XhrWithMeta = XMLHttpRequest & { __bb_method?: string; __bb_url?: string };
 
@@ -103,7 +104,7 @@ class NetworkRecorder {
     ) {
       this.__bb_method = method.toUpperCase();
       this.__bb_url = url.toString();
-      return self.originalXhrOpen.call(this, method, url, async !== undefined ? async : true, username ?? null, password ?? null);
+      return originalXhrOpen.call(this, method, url, async !== undefined ? async : true, username ?? null, password ?? null);
     };
 
     XMLHttpRequest.prototype.send = function (
@@ -111,12 +112,12 @@ class NetworkRecorder {
       body?: Document | XMLHttpRequestBodyInit | null,
     ) {
       this.addEventListener('load', function (this: XhrWithMeta) {
-        if (!self.active) return;
+        if (!isActive()) return;
         const ct = this.getResponseHeader('content-type') ?? '';
         if (!ct.includes('application/json')) return;
         try {
           const parsed: unknown = JSON.parse(this.responseText);
-          self.emit({
+          emit({
             id: crypto.randomUUID(),
             url: this.__bb_url ?? '',
             method: this.__bb_method ?? 'GET',
@@ -126,7 +127,7 @@ class NetworkRecorder {
           });
         } catch { /* malformed JSON */ }
       });
-      return self.originalXhrSend.call(this, body);
+      return originalXhrSend.call(this, body);
     };
   }
 }

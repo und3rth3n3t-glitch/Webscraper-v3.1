@@ -13,14 +13,12 @@ let overlayEl: HTMLDivElement | null = null;
 let tooltipEl: HTMLDivElement | null = null;
 let hoveredElement: Element | null = null;
 let similarOverlays: HTMLDivElement[] = [];
-let pickerOptions: Record<string, unknown> = {};
 let visibilityHandler: (() => void) | null = null;
 
-export function startPicker(mode: 'single' | 'allSimilar' | 'container' = 'single', options: Record<string, unknown> = {}): void {
+export function startPicker(mode: 'single' | 'allSimilar' | 'container' = 'single'): void {
   if (isActive) stopPicker();
   isActive = true;
   currentMode = mode;
-  pickerOptions = options;
 
   createOverlay();
   createTooltip();
@@ -57,7 +55,6 @@ export function stopPicker(): void {
   removeTooltip();
   clearSimilarOverlays();
   hoveredElement = null;
-  pickerOptions = {};
 }
 
 function createOverlay(): void {
@@ -283,30 +280,7 @@ async function pickElement(element: Element): Promise<void> {
     } catch { /* expected */ }
   }
 
-  let similarLinks: { count: number; examples: string[] } | null = null;
-  if (pickerOptions.includeSimilarInfo) {
-    try {
-      const similar = resolveAllSimilar(descriptor);
-      const clickableEls: Element[] = [];
-      for (const el of similar) {
-        if (el.tagName === 'A' || el.tagName === 'BUTTON') {
-          clickableEls.push(el);
-        } else {
-          const a = el.querySelector('a') || el.querySelector('button');
-          if (a) clickableEls.push(a);
-        }
-      }
-      similarLinks = {
-        count: clickableEls.length,
-        examples: clickableEls
-          .slice(0, 5)
-          .map((el) => ((el as HTMLElement).innerText || el.textContent || '').trim().substring(0, 60))
-          .filter(Boolean),
-      };
-    } catch { /* expected */ }
-  }
-
-  const pickData = { descriptor, elementType, label, mode: currentMode, allSimilarCount, extra, similarLinks };
+  const pickData = { descriptor, elementType, label, mode: currentMode, allSimilarCount, extra };
   window.dispatchEvent(new CustomEvent('__blueberry_element_picked', { detail: pickData }));
 }
 

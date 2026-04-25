@@ -124,7 +124,7 @@ function detectHeaderRows(table: Element): Element[] {
 
   const firstCells = Array.from(first.children);
   const firstNonEmpty = firstCells.find((c) =>
-    (c instanceof HTMLElement ? c.innerText : c.textContent || '').replace(/ /g, ' ').trim(),
+    (c instanceof HTMLElement ? c.innerText : c.textContent || '').replace(/\u00a0/g, ' ').trim(),
   );
   if (firstNonEmpty) {
     const style = window.getComputedStyle(firstNonEmpty as HTMLElement);
@@ -133,7 +133,7 @@ function detectHeaderRows(table: Element): Element[] {
   }
 
   if (rows.length >= 2) {
-    const normalize = (t: string) => (t || '').replace(/ /g, ' ').trim();
+    const normalize = (t: string) => (t || '').replace(/\u00a0/g, ' ').trim();
     const firstTexts = firstCells.map((c) => normalize(c instanceof HTMLElement ? c.innerText : c.textContent || '')).filter(Boolean);
     const secondTexts = Array.from(rows[1].children)
       .map((c) => normalize(c instanceof HTMLElement ? c.innerText : c.textContent || ''))

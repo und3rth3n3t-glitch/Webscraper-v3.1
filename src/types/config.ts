@@ -17,6 +17,12 @@ export interface SelectorDescriptor {
   _paginationMeta?: { text: string; tagName: string };
 }
 
+// ── Step conditions ───────────────────────────────────────────────────────────
+
+export type StepCondition =
+  | { kind: 'urlMatches';     pattern: string;              negate?: boolean }
+  | { kind: 'elementPresent'; selector: SelectorDescriptor; negate?: boolean };
+
 // ── Base step ─────────────────────────────────────────────────────────────────
 
 export interface BaseStep {
@@ -26,6 +32,7 @@ export interface BaseStep {
   selector: SelectorDescriptor | null;
   elementType: string | null;
   extra: Record<string, unknown> | null;
+  condition?: StepCondition | null;
 }
 
 // ── Step option types ─────────────────────────────────────────────────────────
@@ -36,20 +43,22 @@ export interface SetInputOptions {
   waitMethod: WaitMethod;
   waitAfterMs: number;
   isInitialInput: boolean;
-  subsequentSelector: SelectorDescriptor | null;
+  alternateSelector: SelectorDescriptor | null;
 }
 
 export interface ClickOptions {
   waitMethod: WaitMethod;
   waitAfterMs: number;
   waitForSelector: SelectorDescriptor | null;
+  alternateSelector: SelectorDescriptor | null;
 }
 
 export interface BestMatchOptions {
   matchStrictness: 'loose' | 'normal' | 'strict';
-  candidateSource: 'similar' | 'container';
   containerSelector: SelectorDescriptor | null;
+  alternateContainerSelector: SelectorDescriptor | null;
   clickableFilter: string;
+  sameOriginOnly: boolean;
   waitMethod: WaitMethod;
   waitAfterMs: number;
   waitForSelector: SelectorDescriptor | null;
@@ -159,7 +168,7 @@ export interface ScraperConfig {
   url: string;
   steps: Step[];
   dataMapping?: DataMapping;
-  schemaVersion: 2;
+  schemaVersion: 3;
   createdAt: number;
   updatedAt: number;
 }

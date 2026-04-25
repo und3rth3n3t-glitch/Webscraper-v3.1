@@ -41,11 +41,11 @@ const DEFAULT_STEP_LABELS: Record<StepType, string> = {
 export function getDefaultOptions(type: StepType): StepOptions {
   switch (type) {
     case 'setInput':
-      return { clearBefore: true, pressEnterAfter: false, waitMethod: 'fixedDelay', waitAfterMs: 1500, isInitialInput: false, subsequentSelector: null } satisfies SetInputOptions;
+      return { clearBefore: true, pressEnterAfter: false, waitMethod: 'fixedDelay', waitAfterMs: 1500, isInitialInput: false, alternateSelector: null } satisfies SetInputOptions;
     case 'click':
-      return { waitMethod: 'fixedDelay', waitAfterMs: 1500, waitForSelector: null } satisfies ClickOptions;
+      return { waitMethod: 'fixedDelay', waitAfterMs: 1500, waitForSelector: null, alternateSelector: null } satisfies ClickOptions;
     case 'bestMatch':
-      return { matchStrictness: 'normal', candidateSource: 'similar', containerSelector: null, clickableFilter: 'a, button', waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null } satisfies BestMatchOptions;
+      return { matchStrictness: 'normal', containerSelector: null, alternateContainerSelector: null, clickableFilter: 'a, button', sameOriginOnly: true, waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null } satisfies BestMatchOptions;
     case 'goBack':
       return { waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null } satisfies GoBackOptions;
     case 'scrape':
@@ -204,7 +204,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       url: pageUrl,
       steps,
       dataMapping: currentConfig?.dataMapping,
-      schemaVersion: CURRENT_SCHEMA_VERSION as 2,
+      schemaVersion: CURRENT_SCHEMA_VERSION as 3,
       createdAt: currentConfig?.createdAt || Date.now(),
       updatedAt: Date.now(),
     };

@@ -460,7 +460,10 @@ export function waitForContentChange(
   });
 }
 
-export async function expandHiddenElements(): Promise<void> {
+export async function expandHiddenElements(opts: {
+  isAborted?: () => boolean;
+  onProgress?: (msg: string) => void;
+} = {}): Promise<void> {
   const patterns = [
     '[aria-expanded="false"]',
     'details:not([open])',
@@ -474,12 +477,19 @@ export async function expandHiddenElements(): Promise<void> {
 
   const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  let totalClicked = 0;
   for (const pattern of patterns) {
+    if (opts.isAborted?.()) return;
     const elements = document.querySelectorAll(pattern);
     for (const el of elements) {
+      if (opts.isAborted?.()) return;
       if ((el as HTMLElement).offsetParent === null) continue;
       try {
         (el as HTMLElement).click();
+        totalClicked++;
+        if (totalClicked % 5 === 0) {
+          opts.onProgress?.(`Expanding hidden sections... (${totalClicked} so far)`);
+        }
         await delay(200 + Math.random() * 300);
       } catch { /* expected */ }
     }

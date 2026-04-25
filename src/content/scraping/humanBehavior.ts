@@ -129,7 +129,7 @@ export async function naturalClick(
 export async function typeText(
   element: HTMLElement,
   text: string,
-  opts: { clearBefore?: boolean; pressEnterAfter?: boolean } = {},
+  opts: { clearBefore?: boolean } = {},
 ): Promise<void> {
   if (opts.clearBefore) {
     await clearInput(element);
@@ -143,10 +143,6 @@ export async function typeText(
     }
     element.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
     await delay(40 + Math.random() * 80);
-  }
-
-  if (opts.pressEnterAfter) {
-    await pressEnter(element);
   }
 }
 
@@ -175,14 +171,22 @@ export async function clearInput(element: HTMLElement): Promise<void> {
 
 export async function pressEnter(element: HTMLElement): Promise<void> {
   if (!element) return;
-  await delay(150 + Math.random() * 200);
-  const keyInit = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true };
+
+  const keyInit: KeyboardEventInit = {
+    key: 'Enter',
+    code: 'Enter',
+    keyCode: 13,
+    which: 13,
+    bubbles: true,
+    cancelable: true,
+  };
+
   element.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-  await delay(50);
+  await delay(40 + Math.random() * 60);
   element.dispatchEvent(new KeyboardEvent('keyup', keyInit));
-  element.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+
   const form = element.closest('form');
-  if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  if (form) form.requestSubmit();
 }
 
 export async function smoothScrollToElement(element: HTMLElement): Promise<void> {

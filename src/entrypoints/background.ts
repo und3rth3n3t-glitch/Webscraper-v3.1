@@ -143,6 +143,7 @@ export default defineBackground(() => {
       'FLOW_PROGRESS', 'FLOW_COMPLETE', 'FLOW_ERROR',
       'CLOUDFLARE_DETECTED', 'FLOW_PAUSED', 'FLOW_RESUMED',
       'NETWORK_CALL_CAPTURED', 'PAGE_INFO',
+      'SCAN_PROGRESS', 'SCAN_COMPLETE', 'SCAN_ERROR',
     ];
     if (contentToSidepanel.includes(type)) {
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
@@ -155,6 +156,7 @@ export default defineBackground(() => {
       'PING', 'START_PICKER', 'CANCEL_PICKER',
       'EXECUTE_FLOW', 'ABORT_FLOW', 'RESUME_AFTER_CLOUDFLARE',
       'HIGHLIGHT_ELEMENT', 'UNHIGHLIGHT_ELEMENT', 'GET_PAGE_INFO',
+      'SCAN_ELEMENTS', 'SCAN_ABORT',
     ];
     if (sidepanelToContent.includes(type)) {
       const frameId = message.frameId as number | undefined;
@@ -178,7 +180,7 @@ export default defineBackground(() => {
           }
           sendResponse({ ok: true });
         } else {
-          const opts = frameId != null ? { frameId } : {};
+          const opts = frameId !== null && frameId !== undefined ? { frameId } : {};
           chrome.tabs.sendMessage(tabId, message, opts, (response: unknown) => {
             if (chrome.runtime.lastError) {
               sendResponse({ error: chrome.runtime.lastError.message });

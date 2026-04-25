@@ -1,14 +1,14 @@
 import type { ScraperConfig } from '../../types/config';
 
 const CONFIGS_KEY = 'blueberry_scraper_configs';
-const PREFS_KEY   = 'blueberry_scraper_prefs';
+export const PREFS_KEY = 'blueberry_scraper_prefs';
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 const STEP_OPTION_DEFAULTS: Record<string, Record<string, unknown>> = {
-  setInput:   { clearBefore: true, pressEnterAfter: false, waitMethod: 'fixedDelay', waitAfterMs: 1500, isInitialInput: false, subsequentSelector: null },
-  click:      { waitMethod: 'fixedDelay', waitAfterMs: 1500, waitForSelector: null },
-  bestMatch:  { matchStrictness: 'normal', candidateSource: 'similar', containerSelector: null, clickableFilter: 'a, button', waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null },
+  setInput:   { clearBefore: true, pressEnterAfter: false, waitMethod: 'fixedDelay', waitAfterMs: 1500, isInitialInput: false, alternateSelector: null },
+  click:      { waitMethod: 'fixedDelay', waitAfterMs: 1500, waitForSelector: null, alternateSelector: null },
+  bestMatch:  { matchStrictness: 'normal', candidateSource: 'similar', containerSelector: null, alternateContainerSelector: null, clickableFilter: 'a, button', waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null },
   goBack:     { waitMethod: 'contentChange', waitAfterMs: 1500, waitForSelector: null },
   scrape:     { mode: 'specificElements', scrollToBottom: true, expandHidden: false, paginate: false, paginationSelector: null, pageCount: 0, elements: [] },
   selectEach: { selectEachOptions: { controlType: null, controlSelector: null, options: [], contentAreaSelector: null, subSteps: [], waitAfterSelectMs: 1500 } },
@@ -37,6 +37,14 @@ export function migrateConfig(config: Record<string, unknown>): ScraperConfig | 
     .map((step) => {
       if (!step || typeof step !== 'object') return null;
       const defaults = STEP_OPTION_DEFAULTS[step.type as string] || {};
+      const rawOpts = (step.options as Record<string, unknown>) || {};
+
+      // v2 → v3: SetInputOptions.subsequentSelector → alternateSelector.
+      if (step.type === 'setInput' && 'subsequentSelector' in rawOpts) {
+        rawOpts.alternateSelector = rawOpts.subsequentSelector ?? null;
+        delete rawOpts.subsequentSelector;
+      }
+
       return {
         id: step.id,
         type: step.type,
@@ -45,7 +53,8 @@ export function migrateConfig(config: Record<string, unknown>): ScraperConfig | 
         selector: step.selector || null,
         elementType: step.elementType || null,
         extra: step.extra || null,
-        options: { ...defaults, ...(step.options as Record<string, unknown> || {}) },
+        condition: (step.condition as Record<string, unknown> | null | undefined) ?? null,
+        options: { ...defaults, ...rawOpts },
       };
     })
     .filter(Boolean);

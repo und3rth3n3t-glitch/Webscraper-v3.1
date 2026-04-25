@@ -1,4 +1,5 @@
-import { resolveElement, resolveAllSimilar } from './elementResolution';
+import { resolveElement, resolveWithAlternate } from './elementResolution';
+import { extractPageBlocks, mergePages, type PageContent } from '../extraction/pageBlockExtractor';
 import { findBestMatch } from '../../common/tokenMatcher';
 import {
   typeText,
@@ -13,16 +14,12 @@ import {
   waitForElement,
   waitForContentChange,
   expandHiddenElements,
-  detectElementType,
-  getElementLabel,
-  TABLE_FRAMEWORK_SELECTORS,
-  CHART_SELECTORS,
-  promoteToChartContainer,
-  deduplicateNested,
+  CHART_LIB_PATTERN,
 } from '../extraction/domUtils';
 import { extractTable } from '../extraction/tableExtractor';
 import { extractChartData } from '../extraction/chartExtractor';
 import { paginatePages, paginateElement } from './paginationHandler';
+import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
 import { detectCloudflareChallenge, waitForChallengeToClear } from '../cloudflareDetector';
 import type {
@@ -37,11 +34,37 @@ import type {
   AwaitUserActionStep,
   ScrapeElementConfig,
   SelectorDescriptor,
+  StepCondition,
 } from '../../types/config';
 import type { ScrapingResult, IterationResult } from '../../types/extraction';
 
 let abortSignal = false;
 let flowRunning = false;
+
+// Runtime-toggleable: when true, scrape output includes verbose diagnostic
+// fields (saved-descriptor dumps on chart-resolution failures, etc.). The
+// initial value is loaded from chrome.storage.local prefs (key set by the
+// "Developer Options → Show debug info in scrape output" checkbox in the
+// sidepanel) and kept in sync via storage.onChanged. Off by default.
+let DEBUG = false;
+
+(async () => {
+  try {
+    const result = await browser.storage.local.get(PREFS_KEY);
+    const prefs = (result[PREFS_KEY] as Record<string, unknown> | undefined) || {};
+    DEBUG = !!prefs.debug;
+  } catch { /* expected */ }
+})();
+
+try {
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    const change = changes[PREFS_KEY];
+    if (!change) return;
+    const next = (change.newValue as Record<string, unknown> | undefined) || {};
+    DEBUG = !!next.debug;
+  });
+} catch { /* expected: SW restart timing */ }
 
 const NAVIGATING_STEP_TYPES = new Set(['click', 'bestMatch', 'goBack']);
 
@@ -127,7 +150,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       sendProgress({ phase: 'loop', termIndex: i, stepLabel: '', status: 'running', taskId });
 
       const iterData: Record<string, unknown>[] = [];
-      let iterStatus: 'success' | 'error' = 'success';
+      let iterStatus: 'success' | 'error' | 'skipped' = 'success';
       let iterError: string | undefined;
 
       try {
@@ -138,7 +161,9 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
           const step = loopSteps[si];
           sendProgress({ phase: 'loop', termIndex: i, stepLabel: step.label, status: 'running', taskId });
 
-          if (NAVIGATING_STEP_TYPES.has(step.type)) {
+          const isNavigating = NAVIGATING_STEP_TYPES.has(step.type);
+
+          if (isNavigating) {
             try {
               browser.runtime.sendMessage({
                 type: 'REGISTER_CONTINUATION',
@@ -153,31 +178,40 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
             } catch { /* extension context may be invalidated */ }
           }
 
-          const stepData = await executeStep(
-            step,
-            term,
-            i,
-            (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
-            afk,
-          );
+          let stepData: Record<string, unknown> | null = null;
+          try {
+            stepData = await executeStep(
+              step,
+              term,
+              i,
+              (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
+              afk,
+            );
 
-          if (NAVIGATING_STEP_TYPES.has(step.type)) {
-            // Check for cloudflare after navigation
-            const challenge = detectCloudflareChallenge();
-            if (challenge.detected && challenge.type) {
-              browser.runtime.sendMessage({
-                type: 'FLOW_PAUSED',
-                payload: { reason: 'cloudflare', challengeType: challenge.type, taskId },
-              });
+            if (isNavigating) {
+              // Check for cloudflare after navigation
+              const challenge = detectCloudflareChallenge();
+              if (challenge.detected && challenge.type) {
+                browser.runtime.sendMessage({
+                  type: 'FLOW_PAUSED',
+                  payload: { reason: 'cloudflare', challengeType: challenge.type, taskId },
+                });
 
-              await Promise.race([waitForChallengeToClear().promise, waitForResumeSignal()]);
+                await Promise.race([waitForChallengeToClear().promise, waitForResumeSignal()]);
 
-              browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
+                browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
+              }
             }
-
-            try {
-              browser.runtime.sendMessage({ type: 'CANCEL_CONTINUATION' });
-            } catch { /* expected */ }
+          } finally {
+            // Always cancel the continuation for navigating steps — including when
+            // the step throws (e.g. SkipIterationError). Without this, a phantom
+            // continuation sits in the background and fires on the next navigation,
+            // corrupting subsequent iterations.
+            if (isNavigating) {
+              try {
+                browser.runtime.sendMessage({ type: 'CANCEL_CONTINUATION' });
+              } catch { /* expected */ }
+            }
           }
 
           if (stepData !== null && step.type === 'scrape') {
@@ -206,7 +240,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
         }
         if (e.name === 'SkipIterationError') {
           sendProgress({ phase: 'loop', termIndex: i, stepLabel: e.message, status: 'skipped', taskId });
-          iterStatus = 'error';
+          iterStatus = 'skipped';
           iterError = e.message;
         } else {
           sendProgress({ phase: 'loop', termIndex: i, stepLabel: e.message, status: 'error', taskId });
@@ -284,6 +318,28 @@ async function waitAfterAction(
   }
 }
 
+// ── Step conditions ──
+
+export function evaluateCondition(cond: StepCondition): boolean {
+  try {
+    if (cond.kind === 'urlMatches') {
+      const regex = new RegExp(cond.pattern);
+      const matches = regex.test(window.location.href);
+      return cond.negate ? !matches : matches;
+    }
+    if (cond.kind === 'elementPresent') {
+      const { confidence } = resolveElement(cond.selector);
+      const present = confidence > 0;
+      return cond.negate ? !present : present;
+    }
+    return true;
+  } catch {
+    // Invalid regex, missing selector fields, or any unexpected throw → fail-closed.
+    // Running a step on the wrong page is worse than skipping it.
+    return false;
+  }
+}
+
 // ── Step dispatch ──
 
 type OnProgress = ((msg: string) => void) | undefined;
@@ -295,6 +351,14 @@ async function executeStep(
   onProgress: OnProgress,
   afk: boolean,
 ): Promise<Record<string, unknown> | null> {
+  if (step.condition) {
+    const passed = evaluateCondition(step.condition);
+    if (!passed) {
+      onProgress?.(`Skipping ${step.label || step.type}: condition not met`);
+      return null;
+    }
+  }
+
   switch (step.type) {
     case 'setInput':
       return executeSetInput(step, searchTerm, iterationIndex, onProgress, afk);
@@ -326,11 +390,13 @@ async function executeSetInput(
   afk: boolean,
 ): Promise<null> {
   const opts = step.options;
-  const isInitial = opts.isInitialInput !== false;
-  const useSubsequent = iterationIndex > 0 && opts.subsequentSelector && isInitial;
-  const descriptor = useSubsequent ? opts.subsequentSelector! : step.selector!;
 
-  const el = await resolveWithRetry(descriptor, onProgress, step.label || 'input');
+  const el = await resolveWithRetry(
+    step.selector!,
+    opts.alternateSelector ?? null,
+    onProgress,
+    step.label || 'input',
+  );
 
   onProgress?.(`Typing "${searchTerm ?? ''}" into ${step.label || 'input field'}`);
 
@@ -348,6 +414,7 @@ async function executeSetInput(
     await randomDelay(600, 1200);
   }
 
+  void iterationIndex; // No longer used — alternate is iteration-independent.
   void afk; // afk mode: typeText handles delays; no change needed for text input
   return null;
 }
@@ -358,7 +425,12 @@ async function executeClick(
   afk: boolean,
 ): Promise<null> {
   const opts = step.options;
-  const el = await resolveWithRetry(step.selector!, onProgress, step.label || 'button');
+  const el = await resolveWithRetry(
+    step.selector!,
+    opts.alternateSelector ?? null,
+    onProgress,
+    step.label || 'button',
+  );
 
   onProgress?.(`Clicking ${step.label || 'element'}`);
   await naturalClick(el, { afk });
@@ -379,46 +451,51 @@ async function executeBestMatch(
   const strictness = opts.matchStrictness || 'normal';
   const threshold = STRICTNESS_THRESHOLDS[strictness] ?? 0.5;
   const fuzzy = strictness === 'loose';
-  const candidateSource = opts.candidateSource || 'similar';
 
   if (!searchTerm) {
     throw new SkipIterationError('No search term provided for best match step');
   }
-
-  let clickableElements: HTMLElement[] = [];
-
-  if (candidateSource === 'container' && opts.containerSelector) {
-    const { element: container } = resolveElement(opts.containerSelector);
-    if (!container) {
-      throw new SkipIterationError('Could not find the container element');
-    }
-    const clickableSelector = opts.clickableFilter || 'a, button';
-    clickableElements = Array.from(container.querySelectorAll<HTMLElement>(clickableSelector))
-      .filter((el) => el.offsetParent !== null);
-    onProgress?.(`Found ${clickableElements.length} clickable elements in container, scoring against "${searchTerm}"`);
-  } else {
-    await resolveWithRetry(step.selector!, onProgress, step.label || 'example link');
-    const similar = resolveAllSimilar(step.selector!);
-
-    for (const el of similar) {
-      const htmlEl = el as HTMLElement;
-      if (htmlEl.tagName === 'A' || htmlEl.tagName === 'BUTTON') {
-        clickableElements.push(htmlEl);
-      } else {
-        const anchor = htmlEl.querySelector<HTMLElement>('a');
-        if (anchor) {
-          clickableElements.push(anchor);
-        } else {
-          const button = htmlEl.querySelector<HTMLElement>('button');
-          if (button) clickableElements.push(button);
-        }
-      }
-    }
-    onProgress?.(`Found ${clickableElements.length} similar elements, scoring against "${searchTerm}"`);
+  if (!opts.containerSelector) {
+    throw new SkipIterationError('No container configured for best match step');
   }
 
+  const { element: container } = resolveWithAlternate(
+    opts.containerSelector,
+    opts.alternateContainerSelector ?? null,
+  );
+  if (!container) {
+    // Pass-through: assume we've already landed on the destination page
+    // (e.g. search that sometimes hits disambiguation, sometimes the article directly).
+    // Caveat: relies on container (and alternate) selectors being specific enough not
+    // to exist on the "already-landed" page.
+    onProgress?.('Best-match container not found on this page — continuing as if already on destination');
+    return null;
+  }
+
+  const clickableSelector = opts.clickableFilter || 'a, button';
+  let clickableElements = Array.from(container.querySelectorAll<HTMLElement>(clickableSelector))
+    .filter((el) => el.offsetParent !== null);
+
+  if (opts.sameOriginOnly ?? true) {
+    const currentHost = location.host;
+    const before = clickableElements.length;
+    clickableElements = clickableElements.filter((el) => {
+      if (!(el instanceof HTMLAnchorElement) || !el.href) return true;
+      try {
+        return new URL(el.href, location.href).host === currentHost;
+      } catch {
+        return true;
+      }
+    });
+    if (clickableElements.length < before) {
+      onProgress?.(`Filtered to ${clickableElements.length} same-site links (dropped ${before - clickableElements.length} off-site)`);
+    }
+  }
+
+  onProgress?.(`Found ${clickableElements.length} clickable elements in container, scoring against "${searchTerm}"`);
+
   if (clickableElements.length === 0) {
-    throw new SkipIterationError(`No clickable elements found for "${searchTerm}"`);
+    throw new SkipIterationError(`No clickable elements found in container for "${searchTerm}"`);
   }
 
   const { element: bestEl, score, text } = findBestMatch(clickableElements, searchTerm, threshold, fuzzy);
@@ -482,7 +559,7 @@ async function executeSelectEach(
   const opts = step.options.selectEachOptions;
   const data: Record<string, unknown> = {};
 
-  const controlEl = await resolveWithRetry(opts.controlSelector!, onProgress, 'control');
+  const controlEl = await resolveWithRetry(opts.controlSelector!, null, onProgress, 'control');
   const selectedOptions = (opts.options || []).filter((o) => o.selected);
 
   onProgress?.(`Select Each: iterating ${selectedOptions.length} options`);
@@ -565,120 +642,26 @@ async function scrapeWholePage(
     await expandHiddenElements();
   }
 
-  const allData: Array<Record<string, unknown>> = [];
+  const pages: PageContent[] = [];
 
   if (opts.paginate && opts.paginationSelector) {
-    allData.push(await extractPageContent());
+    pages.push(await extractPageBlocks());
 
     const pagesScraped = await paginatePages({
       paginationSelector: opts.paginationSelector,
       pageCount: opts.pageCount || 0,
       onPage: async () => {
         if (opts.scrollToBottom) await scrollToBottom();
-        allData.push(await extractPageContent());
+        pages.push(await extractPageBlocks());
       },
       onProgress,
       afk,
     });
 
-    return { ...mergePageData(allData), pagesScraped };
+    return { content: mergePages(pages), pagesScraped };
   }
 
-  return { ...(await extractPageContent()), pagesScraped: 1 };
-}
-
-async function extractPageContent(): Promise<Record<string, unknown>> {
-  const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'))
-    .map((h) => (h as HTMLElement).textContent?.trim())
-    .filter(Boolean);
-
-  const paragraphs = Array.from(document.querySelectorAll('p'))
-    .map((p) => p.textContent?.trim())
-    .filter((t) => t && t.length > 20);
-
-  const lists = Array.from(document.querySelectorAll('ul,ol'))
-    .map((list) => ({
-      type: list.tagName.toLowerCase(),
-      items: Array.from(list.querySelectorAll('li'))
-        .map((li) => li.textContent?.trim())
-        .filter(Boolean),
-    }))
-    .filter((l) => l.items.length > 0);
-
-  const tableEls = new Set<Element>();
-  for (const el of document.querySelectorAll(TABLE_FRAMEWORK_SELECTORS)) {
-    try {
-      if (detectElementType(el as HTMLElement) === 'table') tableEls.add(el);
-    } catch { /* expected */ }
-  }
-  deduplicateNested(tableEls);
-
-  const tables: Array<Record<string, unknown>> = [];
-  for (const el of tableEls) {
-    try {
-      const data = extractTable(el as HTMLElement);
-      if (data && data.length > 0) {
-        tables.push({ label: getElementLabel(el as HTMLElement), rows: data });
-      }
-    } catch { /* expected */ }
-  }
-
-  const chartEls = new Set<Element>();
-  for (const sel of CHART_SELECTORS) {
-    let nodeList: NodeListOf<Element>;
-    try { nodeList = document.querySelectorAll(sel); } catch { continue; }
-    for (const el of nodeList) {
-      try {
-        if (chartEls.has(el)) continue;
-        const chartEl = promoteToChartContainer(el as HTMLElement);
-        if (!chartEls.has(chartEl) && detectElementType(chartEl) === 'chart') {
-          chartEls.add(chartEl);
-        }
-      } catch { /* expected */ }
-    }
-  }
-  deduplicateNested(chartEls);
-
-  const charts: Array<Record<string, unknown>> = [];
-  for (const el of chartEls) {
-    try {
-      const result = await extractChartData(el as HTMLElement);
-      charts.push({
-        title: result.title,
-        label: getElementLabel(el as HTMLElement),
-        data: result.data,
-        method: result.method,
-        canExtract: result.canExtract,
-        ...(result.canExtract ? {} : { _extractionNote: (result as unknown as Record<string, unknown>)._extractionNote || (result as unknown as Record<string, unknown>).message }),
-      });
-    } catch { /* expected */ }
-  }
-
-  const links = Array.from(document.querySelectorAll('a[href]'))
-    .map((a) => ({ text: a.textContent?.trim(), href: (a as HTMLAnchorElement).href }))
-    .filter((l) => l.text);
-
-  return {
-    pageTitle: document.title,
-    content: { headings, paragraphs, lists, tables, charts, links },
-  };
-}
-
-function mergePageData(pages: Array<Record<string, unknown>>): Record<string, unknown> {
-  if (pages.length === 0) return {};
-  if (pages.length === 1) return pages[0];
-
-  const merged: Record<string, unknown> = { pageTitle: (pages[0] as { pageTitle?: unknown }).pageTitle, content: {} };
-  const content = merged.content as Record<string, unknown>;
-
-  for (const key of ['headings', 'paragraphs', 'links']) {
-    content[key] = pages.flatMap((p) => ((p as { content?: Record<string, unknown[]> }).content?.[key]) || []);
-  }
-  content.lists = pages.flatMap((p) => ((p as { content?: Record<string, unknown[]> }).content?.lists) || []);
-  content.tables = pages.flatMap((p) => ((p as { content?: Record<string, unknown[]> }).content?.tables) || []);
-  content.charts = pages.flatMap((p) => ((p as { content?: Record<string, unknown[]> }).content?.charts) || []);
-
-  return merged;
+  return { content: await extractPageBlocks(), pagesScraped: 1 };
 }
 
 // ── Element-level scraping ──
@@ -698,20 +681,66 @@ function findPaginationContainer(tableEl: HTMLElement, paginationDescriptor: Sel
   return tableEl.closest('section, div, article') || tableEl.parentElement || tableEl;
 }
 
+function isLikelyChart(el: Element): boolean {
+  // Element renders an SVG (Highcharts, Recharts, ApexCharts, ECharts, etc.).
+  if (el.querySelector('svg')) return true;
+  // Self or close ancestor has a chart-library class (Chart.js / canvas-rendered libs).
+  let cur: Element | null = el;
+  for (let i = 0; i < 4 && cur; i++) {
+    const cls = ((cur as HTMLElement).className || '').toString();
+    if (CHART_LIB_PATTERN.test(cls)) return true;
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
 async function scrapeElement(
   elConfig: ScrapeElementConfig,
   onProgress: OnProgress,
   afk: boolean,
 ): Promise<unknown> {
-  const el = await resolveWithRetry(elConfig.selector, onProgress, elConfig.name);
+  const el = await resolveWithRetry(elConfig.selector, null, onProgress, elConfig.name);
 
   if (elConfig.detectedType === 'chart') {
+    // Sanity check: does the resolved element actually look like a chart?
+    // Catches cases where the saved descriptor's fuzzy strategies mismatch on
+    // refresh and land on something else (Mapbox map div, image carousel, etc).
+    if (!isLikelyChart(el)) {
+      const desc = elConfig.selector;
+      return {
+        _canExtract: false,
+        _warning: "The element saved as a chart doesn't contain a chart on this page. The page layout likely shifted between when you picked the chart and now. Try re-picking the chart.",
+        _resolvedTagName: (el as HTMLElement).tagName,
+        _resolvedClassName: ((el as HTMLElement).className || '').toString().substring(0, 200),
+        ...(DEBUG ? {
+          _savedDescriptor: {
+            cssSelector: desc?.cssSelector,
+            xpath: desc?.xpathSelector,
+            tagName: desc?.tagName,
+            textContent: desc?.textContent?.substring(0, 80),
+            ariaLabel: desc?.ariaLabel,
+            parentSelector: desc?.position?.parentSelector,
+            childIndex: desc?.position?.childIndex,
+            attributes: desc?.attributes,
+          },
+        } : {}),
+      };
+    }
+
     const result = await extractChartData(el);
     if (!result.canExtract) {
+      // Non-fatal: emit a warning entry for this chart and let the rest of
+      // the iteration continue. The wholepage extractor handles unextractable
+      // charts the same way (chart block with canExtract: false).
       if (result.data) {
         return { ...(result.data as unknown as Record<string, unknown>), _warning: result.message };
       }
-      throw new Error(result.message);
+      return {
+        _canExtract: false,
+        _warning: result.message,
+        _resolvedTagName: (el as HTMLElement).tagName,
+        _resolvedClassName: ((el as HTMLElement).className || '').toString().substring(0, 200),
+      };
     }
     return result.data;
   }
@@ -868,24 +897,42 @@ function applyFieldFilter(rows: Record<string, unknown>[], fields: string[]): Re
 }
 
 async function resolveWithRetry(
-  descriptor: SelectorDescriptor,
+  primary: SelectorDescriptor,
+  alternate: SelectorDescriptor | null,
   onProgress: OnProgress,
   label: string,
   maxRetries = 3,
 ): Promise<HTMLElement> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     checkAbort();
-    const { element } = resolveElement(descriptor);
-    if (element) return element as HTMLElement;
+    const { element, confidence, strategy } = resolveWithAlternate(primary, alternate);
+    if (element) {
+      onProgress?.(`Resolved "${label}" via ${strategy} (${(confidence * 100).toFixed(0)}%)`);
+      return element as HTMLElement;
+    }
 
     if (attempt < maxRetries) {
       onProgress?.(`Couldn't find "${label}", retrying (${attempt}/${maxRetries})...`);
       await randomDelay(1000, 1500);
     }
   }
+
+  const primaryHints = describeDescriptor(primary);
+  const altHints = alternate ? `; alternate: ${describeDescriptor(alternate)}` : '';
+  onProgress?.(`Resolver failed for "${label}". Tried: ${primaryHints}${altHints}`);
   throw new Error(
-    `Element not found: Could not locate "${label}" after ${maxRetries} attempts. The page layout may have changed.`,
+    `Element not found: Could not locate "${label}" after ${maxRetries} attempts. Tried: ${primaryHints}${altHints}`,
   );
+}
+
+function describeDescriptor(descriptor: SelectorDescriptor): string {
+  const parts: string[] = [];
+  if (descriptor.cssSelector)             parts.push(`css=${descriptor.cssSelector}`);
+  if (descriptor.attributes?.name)        parts.push(`name=${descriptor.attributes.name}`);
+  if (descriptor.ariaLabel)               parts.push(`aria-label=${descriptor.ariaLabel}`);
+  if (descriptor.placeholder)             parts.push(`placeholder=${descriptor.placeholder}`);
+  if (descriptor.tagName)                 parts.push(`tag=${descriptor.tagName}`);
+  return parts.join(' | ') || '(empty descriptor)';
 }
 
 function findOptionElement(

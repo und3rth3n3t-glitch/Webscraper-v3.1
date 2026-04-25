@@ -1,5 +1,5 @@
 import { extractTable } from './tableExtractor';
-import { extractValuesFromSvg, HIGHCHARTS_LOCATOR, APEXCHARTS_LOCATOR, type SvgLocator } from './svgValueEngine';
+import { extractValuesFromSvg, HIGHCHARTS_LOCATOR, APEXCHARTS_LOCATOR } from './svgValueEngine';
 
 function debugLog(context: string, error: unknown): void {
   console.debug(`[Blueberry] ${context}:`, error instanceof Error ? error.message : error);
@@ -58,8 +58,16 @@ export async function extractChartData(element: Element | null): Promise<ChartRe
     const chartData = await extractFromChartLibrary(element);
     if (chartData) {
       enrichBridgeCategories(chartData as Record<string, unknown>, element);
+      // Prefer the bridge's title (read directly from the chart's library API)
+      // over the heading-walker fallback. The bridge title is the chart's own
+      // declared title; the heading-walker is a guess at the nearest H1-H6.
+      const bridgeTitle = (chartData as { title?: string | null }).title;
+      const effectiveTitle = bridgeTitle || title;
       return {
-        data: { ...(chartData as Record<string, unknown>), title }, title, method: 'js_library', canExtract: true,
+        data: { ...(chartData as Record<string, unknown>), title: effectiveTitle },
+        title: effectiveTitle,
+        method: 'js_library',
+        canExtract: true,
         message: `Data extracted from ${(chartData as Record<string, unknown>)._library} instance`,
         _extractionNote: `Actual data values extracted from the ${(chartData as Record<string, unknown>)._library} JavaScript API.`,
       };
