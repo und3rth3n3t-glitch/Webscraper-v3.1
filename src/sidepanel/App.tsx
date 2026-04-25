@@ -16,6 +16,7 @@ import { useConfigStore } from './stores/configStore';
 import { useSettingsStore } from './stores/settingsStore';
 import { getPageInfo } from './utils/messaging';
 import { startDispatcher } from './utils/messageDispatcher';
+import { startQueueDispatcher } from './utils/queueDispatcher';
 import type { ConnectionStatus } from '../types/messages';
 
 export default function App() {
@@ -34,6 +35,8 @@ export default function App() {
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
+
+  useEffect(() => startQueueDispatcher(), []);
 
   const activeTab = useUiStore((s) => s.activeTab);
   const setActiveTab = useUiStore((s) => s.setActiveTab);
