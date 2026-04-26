@@ -35,19 +35,23 @@ browser.runtime.onMessage.addListener(
 
       case 'SEND_TASK_PROGRESS':
         hub.invoke('TaskProgress', message.payload).catch(console.error);
-        return true as const;
+        sendResponse({ ok: true });
+        return;
 
       case 'SEND_TASK_COMPLETE':
         hub.invoke('TaskComplete', message.payload).catch(console.error);
-        return true as const;
+        sendResponse({ ok: true });
+        return;
 
       case 'SEND_TASK_ERROR':
         hub.invoke('TaskError', message.payload).catch(console.error);
-        return true as const;
+        sendResponse({ ok: true });
+        return;
 
       case 'SEND_TASK_PAUSED':
         hub.invoke('TaskPaused', message.payload).catch(console.error);
-        return true as const;
+        sendResponse({ ok: true });
+        return;
 
       case 'GET_CONNECTION_STATUS':
         sendResponse({ connected: hub.isConnected() });

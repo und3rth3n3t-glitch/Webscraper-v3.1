@@ -311,6 +311,9 @@ export default defineBackground(() => {
       'SEND_TASK_ERROR', 'SEND_TASK_PAUSED', 'GET_CONNECTION_STATUS',
     ];
     if (sidepanelToOffscreen.includes(type)) {
+      // Messages from relayHubInvocation already carry _fromSW and go directly
+      // to the offscreen; don't re-relay them or we create an infinite loop.
+      if (message._fromSW) return;
       console.log('[SW] Relaying to offscreen:', type);
       const relay = async () => {
         await ensureOffscreen();
