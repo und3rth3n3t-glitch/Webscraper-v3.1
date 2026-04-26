@@ -22,3 +22,9 @@ export function isTerminalStatus(status: RunStatus): boolean {
 export function allTerminal(items: { status: RunStatus }[]): boolean {
   return items.every((i) => isTerminalStatus(i.status));
 }
+
+export function pausedLabel(reason: string | null | undefined): string {
+  if (reason === 'cloudflare') return 'Paused — solve the challenge in your browser';
+  if (reason === 'awaitUserAction') return 'Paused — action needed in your browser';
+  return 'Paused';
+}

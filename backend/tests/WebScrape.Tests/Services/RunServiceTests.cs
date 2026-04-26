@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using WebScrape.Data.Constants;
 using WebScrape.Data.Dto;
 using WebScrape.Data.Entities;
 using WebScrape.Data.Enums;
@@ -157,6 +158,56 @@ public class RunServiceTests
         var stored = await db.RunItems.SingleAsync(r => r.Id == runId);
         Assert.Equal(RunItemStatus.Paused, stored.Status);
         Assert.Equal("cloudflare", stored.PauseReason);
+    }
+
+    [Fact]
+    public async Task MarkPaused_With_AwaitUserAction_Reason_PersistsReason()
+    {
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
+
+        await svc.MarkPausedAsync(new TaskPausedDto
+        {
+            TaskId = runId.ToString(),
+            ConfigId = Guid.NewGuid().ToString(),
+            Reason = PauseReasonConstants.AwaitUserAction,
+            Trigger = "loginWall",
+            Message = "Sign in",
+        });
+
+        var stored = await db.RunItems.SingleAsync(r => r.Id == runId);
+        Assert.Equal(RunItemStatus.Paused, stored.Status);
+        Assert.Equal("awaitUserAction", stored.PauseReason);
+    }
+
+    [Theory]
+    [InlineData("cloudflare")]
+    [InlineData("awaitUserAction")]
+    public async Task RecordProgress_After_Pause_Flips_To_Running(string reason)
+    {
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
+
+        await svc.MarkPausedAsync(new TaskPausedDto
+        {
+            TaskId = runId.ToString(),
+            ConfigId = Guid.NewGuid().ToString(),
+            Reason = reason,
+        });
+
+        await svc.RecordProgressAsync(new TaskProgressDto
+        {
+            TaskId = runId.ToString(),
+            ConfigId = Guid.NewGuid().ToString(),
+            CurrentStep = "next step",
+            CurrentTerm = "alpha",
+            Progress = 50,
+            Phase = "loop",
+        });
+
+        var stored = await db.RunItems.SingleAsync(r => r.Id == runId);
+        Assert.Equal(RunItemStatus.Running, stored.Status);
+        Assert.Equal(50, stored.ProgressPercent);
     }
 
     [Fact]

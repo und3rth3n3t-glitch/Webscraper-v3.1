@@ -11,7 +11,7 @@ export interface QueueTask {
   priority: number;
   createdAt: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
-  pausedReason?: 'cloudflare';
+  pausedReason?: 'cloudflare' | 'awaitUserAction';
   result?: TaskResult;
   error?: string;
   inlineConfig?: ScraperConfig;
@@ -44,8 +44,10 @@ export interface TaskError {
 export interface TaskPaused {
   taskId: string;
   configId: string;
-  reason: 'cloudflare';
+  reason: 'cloudflare' | 'awaitUserAction';
   challengeType: string;
+  trigger?: 'loginWall' | 'captcha' | 'selector' | 'unconditional';
+  message?: string;
   pausedAt: string;
 }
 

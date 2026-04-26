@@ -48,5 +48,7 @@ public class TaskPausedDto
     public string ConfigId { get; set; } = "";
     public string Reason { get; set; } = PauseReasonConstants.Cloudflare;
     public string ChallengeType { get; set; } = "";
+    public string? Trigger { get; set; }
+    public string? Message { get; set; }
     public DateTimeOffset PausedAt { get; set; }
 }

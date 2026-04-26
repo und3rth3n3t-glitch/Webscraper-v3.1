@@ -2,7 +2,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useRun } from '../api/queries';
 import { RunItemStatus } from '../api/types';
 import type { RunStatus } from '../api/types';
-import { statusLabel } from '../utils/runStatus';
+import { statusLabel, pausedLabel } from '../utils/runStatus';
 import ResultViewer from '../components/result/ResultViewer';
 import RawJsonCard from '../components/result/RawJsonCard';
 import { runExportUrl } from '../utils/exportLinks';
@@ -84,7 +84,7 @@ export default function RunDetail() {
 
       {bannerClass ? (
         <div className={`run-banner ${bannerClass}`}>
-          {statusLabel(run.status)}
+          {run.status === RunItemStatus.Paused ? pausedLabel(run.pauseReason) : statusLabel(run.status)}
           {run.errorMessage ? ` — ${run.errorMessage}` : ''}
         </div>
       ) : (

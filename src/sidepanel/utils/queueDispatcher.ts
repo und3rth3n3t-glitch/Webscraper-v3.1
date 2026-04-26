@@ -48,9 +48,9 @@ export function startQueueDispatcher(): () => void {
   });
 
   const offPaused = onMessage('FLOW_PAUSED', (payload) => {
-    const p = payload as { taskId?: string; reason?: string };
-    if (!p.taskId || p.reason !== 'cloudflare') return;
-    useQueueStore.getState().pauseTask(p.taskId, 'cloudflare');
+    const p = payload as { taskId?: string; reason?: 'cloudflare' | 'awaitUserAction' };
+    if (!p.taskId || (p.reason !== 'cloudflare' && p.reason !== 'awaitUserAction')) return;
+    useQueueStore.getState().pauseTask(p.taskId, p.reason);
   });
 
   return () => {

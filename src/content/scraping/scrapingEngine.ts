@@ -22,6 +22,7 @@ import { paginatePages, paginateElement } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
 import { detectCloudflareChallenge, waitForChallengeToClear } from '../cloudflareDetector';
+import { evaluateDetectionRules } from '../detectionRules';
 import type {
   ScraperConfig,
   Step,
@@ -32,6 +33,7 @@ import type {
   SelectEachStep,
   CaptureApiCallsStep,
   AwaitUserActionStep,
+  NavigateToStep,
   ScrapeElementConfig,
   SelectorDescriptor,
   StepCondition,
@@ -66,7 +68,7 @@ try {
   });
 } catch { /* expected: SW restart timing */ }
 
-const NAVIGATING_STEP_TYPES = new Set(['click', 'bestMatch', 'goBack']);
+const NAVIGATING_STEP_TYPES = new Set(['click', 'bestMatch', 'goBack', 'navigateTo']);
 
 export function abortFlow(): void {
   abortSignal = true;
@@ -376,6 +378,8 @@ async function executeStep(
       return executeCaptureApiCalls(step, onProgress);
     case 'awaitUserAction':
       return executeAwaitUserAction(step, onProgress);
+    case 'navigateTo':
+      return executeNavigateTo(step, searchTerm, onProgress);
     default:
       onProgress?.(`Unknown step type`);
       return null;
@@ -613,16 +617,55 @@ async function executeCaptureApiCalls(step: CaptureApiCallsStep, onProgress: OnP
 
 async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnProgress): Promise<null> {
   const opts = step.options;
+  const evalResult = evaluateDetectionRules(opts.detectionRules);
+
+  if (!evalResult.fired) {
+    onProgress?.(`No obstruction detected — skipping pause`);
+    return null;
+  }
+
   onProgress?.(`Waiting for user: ${opts.message}`);
 
   browser.runtime.sendMessage({
     type: 'FLOW_PAUSED',
-    payload: { reason: 'awaitUserAction', message: opts.message },
+    payload: {
+      reason: 'awaitUserAction',
+      trigger: evalResult.trigger,
+      message: opts.message,
+    },
   });
 
   await waitForResumeSignal();
 
   browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
+  return null;
+}
+
+async function executeNavigateTo(
+  step: NavigateToStep,
+  searchTerm: string | null,
+  onProgress: OnProgress,
+): Promise<null> {
+  const rawUrl = step.options.url;
+  const url = searchTerm ? rawUrl.replace(/\{searchTerm\}/g, searchTerm) : rawUrl;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`navigateTo: invalid URL "${url}"`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`navigateTo: unsupported scheme "${parsed.protocol}" — only http(s) allowed`);
+  }
+
+  onProgress?.(`Navigating to ${parsed.href}`);
+  window.location.href = parsed.href;
+
+  // Page is unloading — block forever so the rest of the loop iteration never runs.
+  // The continuation registered at scrapingEngine.ts:166-179 will resume at si + 1
+  // after the new page loads.
+  await new Promise<null>(() => {});
   return null;
 }
 

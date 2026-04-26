@@ -21,7 +21,9 @@ export type FlowCompletePayload = { result: ScrapingResult };
 
 export type FlowErrorPayload = { error: string; stepLabel?: string };
 
-export type FlowPausedPayload = { reason: 'cloudflare'; challengeType: string };
+export type FlowPausedPayload =
+  | { reason: 'cloudflare'; challengeType: string }
+  | { reason: 'awaitUserAction'; trigger: 'loginWall' | 'captcha' | 'selector' | 'unconditional'; message: string };
 
 export function mapFlowProgress(
   ctx: ActiveTaskContext,
@@ -85,11 +87,22 @@ export function mapFlowPaused(
   payload: FlowPausedPayload,
   now: () => string = () => new Date().toISOString(),
 ): TaskPaused {
+  if (payload.reason === 'cloudflare') {
+    return {
+      taskId: ctx.taskId,
+      configId: ctx.configId,
+      reason: 'cloudflare',
+      challengeType: payload.challengeType,
+      pausedAt: now(),
+    };
+  }
   return {
     taskId: ctx.taskId,
     configId: ctx.configId,
-    reason: payload.reason,
-    challengeType: payload.challengeType,
+    reason: 'awaitUserAction',
+    challengeType: '',
+    trigger: payload.trigger,
+    message: payload.message,
     pausedAt: now(),
   };
 }

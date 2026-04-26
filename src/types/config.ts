@@ -115,8 +115,19 @@ export interface CaptureApiCallsOptions {
   includeResponseBody: boolean;
 }
 
+export interface DetectionRules {
+  loginWall?: boolean;
+  captcha?: boolean;
+  selector?: string;
+}
+
 export interface AwaitUserActionOptions {
   message: string;
+  detectionRules?: DetectionRules;
+}
+
+export interface NavigateToOptions {
+  url: string;
 }
 
 // ── Discriminated step union ──────────────────────────────────────────────────
@@ -129,6 +140,7 @@ export interface ScrapeStep     extends BaseStep { type: 'scrape';           opt
 export interface SelectEachStep extends BaseStep { type: 'selectEach';       options: SelectEachOptions; }
 export interface CaptureApiCallsStep extends BaseStep { type: 'captureApiCalls'; options: CaptureApiCallsOptions; }
 export interface AwaitUserActionStep extends BaseStep { type: 'awaitUserAction'; options: AwaitUserActionOptions; }
+export interface NavigateToStep extends BaseStep { type: 'navigateTo'; options: NavigateToOptions; }
 
 export type StepType = Step['type'];
 
@@ -140,7 +152,8 @@ export type Step =
   | ScrapeStep
   | SelectEachStep
   | CaptureApiCallsStep
-  | AwaitUserActionStep;
+  | AwaitUserActionStep
+  | NavigateToStep;
 
 // ── Data mapping ──────────────────────────────────────────────────────────────
 

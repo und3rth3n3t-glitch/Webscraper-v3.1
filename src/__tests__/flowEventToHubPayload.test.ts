@@ -117,4 +117,27 @@ describe('mapFlowPaused', () => {
       pausedAt: FIXED_NOW,
     });
   });
+
+  it('maps an awaitUserAction pause to TaskPaused with trigger and message', () => {
+    const out = mapFlowPaused(
+      ctx,
+      { reason: 'awaitUserAction', trigger: 'loginWall', message: 'Please sign in' },
+      now,
+    );
+    expect(out).toEqual({
+      taskId: 'run-1',
+      configId: 'cfg-1',
+      reason: 'awaitUserAction',
+      challengeType: '',
+      trigger: 'loginWall',
+      message: 'Please sign in',
+      pausedAt: FIXED_NOW,
+    });
+  });
+
+  it('does not include trigger/message on cloudflare pauses', () => {
+    const out = mapFlowPaused(ctx, { reason: 'cloudflare', challengeType: 'cf-turnstile' }, now);
+    expect(out.trigger).toBeUndefined();
+    expect(out.message).toBeUndefined();
+  });
 });

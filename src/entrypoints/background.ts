@@ -209,8 +209,8 @@ export default defineBackground(() => {
         return;
       }
       case 'FLOW_PAUSED': {
-        const flowPayload = payload as { reason?: string; challengeType?: string };
-        if (flowPayload.reason !== 'cloudflare') return; // M1 only forwards Cloudflare
+        const flowPayload = payload as { reason?: string };
+        if (flowPayload.reason !== 'cloudflare' && flowPayload.reason !== 'awaitUserAction') return;
         const hubPayload = mapFlowPaused(activeRemoteTask, payload as unknown as FlowPausedPayload);
         relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
         return;

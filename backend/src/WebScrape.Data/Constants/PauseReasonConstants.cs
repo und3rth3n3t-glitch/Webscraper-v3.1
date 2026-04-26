@@ -4,4 +4,5 @@ namespace WebScrape.Data.Constants;
 public static class PauseReasonConstants
 {
     public const string Cloudflare = "cloudflare";
+    public const string AwaitUserAction = "awaitUserAction";
 }

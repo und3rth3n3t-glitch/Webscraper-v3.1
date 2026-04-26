@@ -14,8 +14,9 @@ export type ContentToSidepanelMessage =
   | { type: 'FLOW_COMPLETE';          payload: { result: ScrapingResult; taskId?: string } }
   | { type: 'FLOW_ERROR';             payload: { error: string; stepLabel?: string; taskId?: string } }
   | { type: 'CLOUDFLARE_DETECTED';    payload: { challengeType: CloudflareChallengeType; taskId?: string } }
-  | { type: 'FLOW_PAUSED';            payload: { reason: 'cloudflare'; challengeType: CloudflareChallengeType; taskId?: string } }
-  | { type: 'FLOW_PAUSED';            payload: { reason: 'awaitUserAction'; message: string; taskId?: string } }
+  | { type: 'FLOW_PAUSED';            payload:
+        | { reason: 'cloudflare'; challengeType: CloudflareChallengeType; taskId?: string }
+        | { reason: 'awaitUserAction'; trigger: 'loginWall' | 'captcha' | 'selector' | 'unconditional'; message: string; taskId?: string } }
   | { type: 'FLOW_RESUMED' }
   | { type: 'NETWORK_CALL_CAPTURED';  payload: ApiCall }
   | { type: 'PAGE_INFO';              payload: { url: string; title: string } }
