@@ -48,6 +48,14 @@ public class RunsController : ControllerBase
         };
     }
 
+    [HttpPost("{id:guid}/cancel")]
+    [CookieCsrf]
+    public async Task<IActionResult> Cancel(Guid id, CancellationToken ct)
+    {
+        var ok = await _runs.CancelAsync(User.GetUserId(), id, ct);
+        return ok ? NoContent() : NotFound();
+    }
+
     [HttpPost("batch")]
     [CookieCsrf]
     public async Task<IActionResult> CreateBatch(

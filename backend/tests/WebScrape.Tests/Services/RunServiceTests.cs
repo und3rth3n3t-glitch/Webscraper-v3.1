@@ -222,4 +222,57 @@ public class RunServiceTests
         var asOwner = await svc.GetAsync(userId, runId);
         Assert.NotNull(asOwner);
     }
+
+    [Theory]
+    [InlineData(RunItemStatus.Pending)]
+    [InlineData(RunItemStatus.Sent)]
+    [InlineData(RunItemStatus.Running)]
+    [InlineData(RunItemStatus.Paused)]
+    public async Task Cancel_cancellable_status_returns_true_and_persists(RunItemStatus initialStatus)
+    {
+        var (svc, db, userId, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
+
+        var run = await db.RunItems.SingleAsync(r => r.Id == runId);
+        run.Status = initialStatus;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var ok = await svc.CancelAsync(userId, runId);
+
+        Assert.True(ok);
+        var stored = await db.RunItems.SingleAsync(r => r.Id == runId);
+        Assert.Equal(RunItemStatus.Cancelled, stored.Status);
+        Assert.NotNull(stored.CompletedAt);
+    }
+
+    [Theory]
+    [InlineData(RunItemStatus.Completed)]
+    [InlineData(RunItemStatus.Failed)]
+    [InlineData(RunItemStatus.Cancelled)]
+    public async Task Cancel_terminal_status_returns_false(RunItemStatus terminalStatus)
+    {
+        var (svc, db, userId, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
+
+        var run = await db.RunItems.SingleAsync(r => r.Id == runId);
+        run.Status = terminalStatus;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var ok = await svc.CancelAsync(userId, runId);
+
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public async Task Cancel_returns_false_for_other_users_run()
+    {
+        var (svc, db, _, task, worker) = await Build();
+        var runId = await SeedSentRun(db, task.Id, worker.Id);
+
+        var ok = await svc.CancelAsync(Guid.NewGuid(), runId);
+
+        Assert.False(ok);
+    }
 }

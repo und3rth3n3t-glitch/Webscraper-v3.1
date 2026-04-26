@@ -415,9 +415,13 @@ export default defineBackground(() => {
     if (changeInfo.status === 'complete') {
       const continuation = pendingContinuations.get(tabId);
       if (continuation) {
-        pendingContinuations.delete(tabId);
+        // Do NOT delete before sending — keep it so that if the tab is mid-redirect
+        // and the content script isn't ready yet (sendMessage rejects), the next
+        // 'complete' event will retry. Delete only on confirmed delivery.
         setTimeout(() => {
-          browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: continuation }).catch(() => {});
+          browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+            .then(() => pendingContinuations.delete(tabId))
+            .catch(() => {}); // retry on next 'complete'
         }, 600);
       }
     }

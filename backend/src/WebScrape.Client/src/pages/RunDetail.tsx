@@ -2,7 +2,8 @@ import { useParams, Link } from 'react-router-dom';
 import { useRun } from '../api/queries';
 import { RunItemStatus } from '../api/types';
 import type { RunStatus } from '../api/types';
-import { statusLabel, pausedLabel } from '../utils/runStatus';
+import { statusLabel, pausedLabel, isTerminalStatus } from '../utils/runStatus';
+import { useCancelRun } from '../api/mutations';
 import ResultViewer from '../components/result/ResultViewer';
 import RawJsonCard from '../components/result/RawJsonCard';
 import { runExportUrl } from '../utils/exportLinks';
@@ -30,6 +31,7 @@ function isWholepageResult(result: unknown): boolean {
 export default function RunDetail() {
   const { id } = useParams();
   const { data: run, isPending, error } = useRun(id);
+  const cancelRun = useCancelRun();
 
   if (isPending) {
     return <div className="view"><div className="loading-state">Loading…</div></div>;
@@ -57,6 +59,15 @@ export default function RunDetail() {
           )}
         </div>
         <div className="flex gap-sm">
+          {!isTerminalStatus(run.status) && (
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={() => cancelRun.mutate(run.id.toString())}
+              disabled={cancelRun.isPending}
+            >
+              {cancelRun.isPending ? 'Cancelling…' : 'Cancel run'}
+            </button>
+          )}
           <a
             className={`btn btn-secondary btn-sm${isComplete ? '' : ' disabled'}`}
             href={isComplete ? runExportUrl(run.id, 'json') : undefined}

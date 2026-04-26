@@ -113,6 +113,18 @@ export function useSaveTask() {
   });
 }
 
+export function useCancelRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (runId: string) => {
+      await api.post(`/api/runs/${runId}/cancel`);
+    },
+    onSuccess: (_data, runId) => {
+      qc.invalidateQueries({ queryKey: ['run', runId] });
+    },
+  });
+}
+
 export function useDeleteTask() {
   const qc = useQueryClient();
   return useMutation({

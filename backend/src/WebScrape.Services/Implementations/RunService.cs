@@ -113,6 +113,22 @@ public class RunService : IRunService
         await _db.SaveChangesAsync(ct);
     }
 
+    public async Task<bool> CancelAsync(Guid userId, Guid runId, CancellationToken ct = default)
+    {
+        var run = await _db.RunItems
+            .Include(r => r.Task)
+            .FirstOrDefaultAsync(r => r.Id == runId, ct);
+        if (run is null || run.Task is null || run.Task.UserId != userId) return false;
+
+        var cancellable = new[] { RunItemStatus.Pending, RunItemStatus.Sent, RunItemStatus.Running, RunItemStatus.Paused };
+        if (!cancellable.Contains(run.Status)) return false;
+
+        run.Status = RunItemStatus.Cancelled;
+        run.CompletedAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        return true;
+    }
+
     public async Task<RunItemDto?> GetAsync(Guid userId, Guid id, CancellationToken ct = default)
     {
         var row = await _db.RunItems

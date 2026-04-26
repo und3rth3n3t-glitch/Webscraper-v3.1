@@ -172,6 +172,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                 payload: {
                   config,
                   searchTerms,
+                  taskId,
                   startTermIndex: i,
                   startLoopStepIndex: si + 1,
                   previousIterations: result.iterations,
