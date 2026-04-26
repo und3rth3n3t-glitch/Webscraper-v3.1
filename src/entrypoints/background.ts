@@ -284,8 +284,6 @@ export default defineBackground(() => {
 
     if (type === 'TASK_RECEIVED') {
       const task = message.payload as QueueTask;
-      // Mirror to sidepanel so the queue tab can render it.
-      browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
       if (activeRemoteTask) {
         pendingRemoteTasks.push(task);
       } else {

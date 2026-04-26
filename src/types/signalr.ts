@@ -6,6 +6,8 @@ export interface QueueTask {
   configId: string;
   configName: string;
   searchTerms: string[];
+  iterationLabel?: string;
+  iterationAssignments?: Record<string, string>;
   priority: number;
   createdAt: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';

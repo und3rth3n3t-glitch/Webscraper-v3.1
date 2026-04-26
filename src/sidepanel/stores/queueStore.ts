@@ -21,6 +21,8 @@ interface QueueState {
   pauseTask: (taskId: string, reason: QueueTask['pausedReason']) => void;
   resumeTask: (taskId: string) => void;
   clearCompleted: () => void;
+  clearPending: () => void;
+  removeTask: (taskId: string) => void;
 }
 
 const ZERO_STATS: QueueStats = { total: 0, pending: 0, completed: 0, failed: 0 };
@@ -44,6 +46,7 @@ export const useQueueStore = create<QueueState>((set) => ({
 
   addTask: (task) =>
     set((s) => {
+      if (s.tasks.some((t) => t.id === task.id)) return s;
       const tasks = [...s.tasks, task];
       return { tasks, stats: recompute(tasks) };
     }),
@@ -90,5 +93,17 @@ export const useQueueStore = create<QueueState>((set) => ({
     set((s) => {
       const tasks = s.tasks.filter((t) => t.status !== 'completed');
       return { tasks, stats: recompute(tasks) };
+    }),
+
+  clearPending: () =>
+    set((s) => {
+      const tasks = s.tasks.filter((t) => t.status !== 'pending');
+      return { tasks, stats: recompute(tasks) };
+    }),
+
+  removeTask: (taskId) =>
+    set((s) => {
+      const tasks = s.tasks.filter((t) => t.id !== taskId);
+      return { tasks, currentTaskId: s.currentTaskId === taskId ? null : s.currentTaskId, stats: recompute(tasks) };
     }),
 }));
