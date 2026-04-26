@@ -24,6 +24,7 @@ interface UiState {
   pendingPickerStepId: string | null;
   pendingPickerField: string | null;
   cloudfarePaused: boolean;
+  awaitActionPaused: { message: string } | null;
 
   setActiveTab: (tab: ActiveTab) => void;
   requestTabSwitch: (tab: ActiveTab) => void;
@@ -37,6 +38,7 @@ interface UiState {
   setRunning: (v: boolean) => void;
   setSavedTabView: (view: string) => void;
   setCloudflarePaused: (v: boolean) => void;
+  setAwaitActionPaused: (v: { message: string } | null) => void;
   showToast: (message: string, type?: Toast['type'], duration?: number) => number;
   dismissToast: (id: number) => void;
 }
@@ -52,6 +54,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   pendingPickerStepId: null,
   pendingPickerField: null,
   cloudfarePaused: false,
+  awaitActionPaused: null,
 
   setActiveTab: (tab) => set({ activeTab: tab }),
 
@@ -103,6 +106,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   setRunning: (v) => set({ isRunning: v }),
   setSavedTabView: (view) => set({ savedTabView: view }),
   setCloudflarePaused: (v) => set({ cloudfarePaused: v }),
+  setAwaitActionPaused: (v) => set({ awaitActionPaused: v }),
 
   showToast: (message, type = 'info', duration = 3000) => {
     const id = ++toastId;

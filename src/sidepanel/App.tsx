@@ -11,6 +11,7 @@ import APISettingsView from './components/APISettingsView';
 import ConfirmDialog from './components/ConfirmDialog';
 import DomainBadge from './components/DomainBadge';
 import CloudflarePauseAlert from './components/CloudflarePauseAlert';
+import AwaitActionPauseAlert from './components/AwaitActionPauseAlert';
 import { useUiStore } from './stores/uiStore';
 import { useConfigStore } from './stores/configStore';
 import { useSettingsStore } from './stores/settingsStore';
@@ -138,6 +139,7 @@ export default function App() {
       <TabBar activeTab={activeTab} onTabClick={handleTabClick} />
       <DomainBadge />
       {cloudfarePaused && <CloudflarePauseAlert />}
+      <AwaitActionPauseAlert />
 
       <div className="app-content">
         {activeTab === 'config' ? <ConfigTab /> :

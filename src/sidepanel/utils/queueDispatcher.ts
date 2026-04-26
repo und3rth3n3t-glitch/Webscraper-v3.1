@@ -1,4 +1,5 @@
 import { useQueueStore } from '../stores/queueStore';
+import { useUiStore } from '../stores/uiStore';
 import { onMessage } from './messageDispatcher';
 import type { QueueTask, TaskResult } from '../../types/signalr';
 import type { ScrapingResult } from '../../types/extraction';
@@ -48,9 +49,19 @@ export function startQueueDispatcher(): () => void {
   });
 
   const offPaused = onMessage('FLOW_PAUSED', (payload) => {
-    const p = payload as { taskId?: string; reason?: 'cloudflare' | 'awaitUserAction' };
+    const p = payload as { taskId?: string; reason?: 'cloudflare' | 'awaitUserAction'; message?: string };
     if (!p.taskId || (p.reason !== 'cloudflare' && p.reason !== 'awaitUserAction')) return;
     useQueueStore.getState().pauseTask(p.taskId, p.reason);
+    if (p.reason === 'cloudflare') {
+      useUiStore.getState().setCloudflarePaused(true);
+    } else {
+      useUiStore.getState().setAwaitActionPaused({ message: p.message ?? 'Action needed in your browser.' });
+    }
+  });
+
+  const offResumed = onMessage('FLOW_RESUMED', () => {
+    useUiStore.getState().setCloudflarePaused(false);
+    useUiStore.getState().setAwaitActionPaused(null);
   });
 
   return () => {
@@ -59,5 +70,6 @@ export function startQueueDispatcher(): () => void {
     offComplete();
     offError();
     offPaused();
+    offResumed();
   };
 }

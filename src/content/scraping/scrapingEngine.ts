@@ -131,7 +131,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       try {
         for (const step of setupSteps) {
           checkAbort();
-          await executeStep(step, null, 0, (msg) => sendProgress({ phase: 'setup', stepLabel: msg, status: 'running', taskId }), afk);
+          await executeStep(step, null, 0, (msg) => sendProgress({ phase: 'setup', stepLabel: msg, status: 'running', taskId }), afk, taskId);
         }
       } catch (err) {
         const e = err as Error;
@@ -189,6 +189,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
               i,
               (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
               afk,
+              taskId,
             );
 
             if (isNavigating) {
@@ -353,6 +354,7 @@ async function executeStep(
   iterationIndex: number,
   onProgress: OnProgress,
   afk: boolean,
+  taskId?: string,
 ): Promise<Record<string, unknown> | null> {
   if (step.condition) {
     const passed = evaluateCondition(step.condition);
@@ -378,7 +380,7 @@ async function executeStep(
     case 'captureApiCalls':
       return executeCaptureApiCalls(step, onProgress);
     case 'awaitUserAction':
-      return executeAwaitUserAction(step, onProgress);
+      return executeAwaitUserAction(step, onProgress, taskId);
     case 'navigateTo':
       return executeNavigateTo(step, searchTerm, onProgress);
     default:
@@ -616,7 +618,7 @@ async function executeCaptureApiCalls(step: CaptureApiCallsStep, onProgress: OnP
   return null;
 }
 
-async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnProgress): Promise<null> {
+async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnProgress, taskId?: string): Promise<null> {
   const opts = step.options;
   const evalResult = evaluateDetectionRules(opts.detectionRules);
 
@@ -633,6 +635,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
       reason: 'awaitUserAction',
       trigger: evalResult.trigger,
       message: opts.message,
+      taskId,
     },
   });
 
