@@ -6,6 +6,7 @@ import ApiKeys from './pages/ApiKeys';
 import Workers from './pages/Workers';
 import Tasks from './pages/Tasks';
 import RunDetail from './pages/RunDetail';
+import Runs from './pages/Runs';
 import Configs from './pages/Configs';
 import ConfigEditor from './pages/ConfigEditor';
 import TaskEditor from './pages/TaskEditor';
@@ -51,6 +52,7 @@ export default function App() {
         <Route path="/run-batches/:id" element={<RunBatchDetail />} />
         <Route path="/workers" element={<Workers />} />
         <Route path="/keys" element={<ApiKeys />} />
+        <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:id" element={<RunDetail />} />
       </Route>
     </Routes>

@@ -3,6 +3,7 @@ import { useRunBatch } from '../api/queries';
 import { RunItemStatus } from '../api/types';
 import type { RunItemDto } from '../api/types';
 import { allTerminal, statusLabel } from '../utils/runStatus';
+import { batchExportUrl } from '../utils/exportLinks';
 
 function batchBannerClass(items: RunItemDto[]): string {
   if (items.length === 0) return '';
@@ -28,6 +29,7 @@ export default function RunBatchDetail() {
 
   const bannerClass = batchBannerClass(batch.runItems);
   const bannerText = batchBannerText(batch.runItems);
+  const isComplete = allTerminal(batch.runItems);
 
   return (
     <div className="view">
@@ -36,7 +38,29 @@ export default function RunBatchDetail() {
           <Link to="/tasks" className="back-btn" aria-label="Back to tasks">←</Link>
           <h2 className="view-title">{batch.taskName}</h2>
         </div>
-        <span className="meta-badge">{batch.workerName}</span>
+        <div className="flex gap-sm items-center">
+          <span className="meta-badge">{batch.workerName}</span>
+          <a
+            className={`btn btn-secondary btn-sm${isComplete ? '' : ' disabled'}`}
+            href={isComplete ? batchExportUrl(batch.id, 'json') : undefined}
+            target="_blank"
+            rel="noreferrer"
+            title={isComplete ? '' : 'Batch is still running'}
+            style={isComplete ? {} : { pointerEvents: 'none', opacity: 0.5 }}
+          >
+            Export JSON
+          </a>
+          <a
+            className={`btn btn-secondary btn-sm${isComplete ? '' : ' disabled'}`}
+            href={isComplete ? batchExportUrl(batch.id, 'csv') : undefined}
+            target="_blank"
+            rel="noreferrer"
+            title={isComplete ? '' : 'Batch is still running'}
+            style={isComplete ? {} : { pointerEvents: 'none', opacity: 0.5 }}
+          >
+            Export CSV
+          </a>
+        </div>
       </div>
 
       {bannerClass && <div className={bannerClass}>{bannerText}</div>}

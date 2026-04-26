@@ -94,6 +94,7 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.Status).HasConversion<string>().IsRequired();
+            e.Property(x => x.ScraperConfigId);
             e.Property(x => x.ResultJsonb).HasColumnType("jsonb").HasConversion(nullableJsonConverter);
             e.Property(x => x.IterationAssignments).HasColumnType("jsonb").HasConversion(nullableJsonConverter);
             e.HasOne(x => x.Task).WithMany().HasForeignKey(x => x.TaskId).OnDelete(DeleteBehavior.Cascade);

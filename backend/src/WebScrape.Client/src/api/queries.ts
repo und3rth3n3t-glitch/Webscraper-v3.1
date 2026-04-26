@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { api } from './client';
-import type { AccountDto, ApiKeyDto, RunBatchDetailDto, RunItemDto, ScraperConfigDto, TaskDto, WorkerDto } from './types';
+import type { AccountDto, ApiKeyDto, PagedResultDto, RunBatchDetailDto, RunBatchListItemDto, RunBatchListQuery, RunItemDto, RunListItemDto, RunListQuery, ScraperConfigDto, TaskDto, WorkerDto } from './types';
 import { RUN_POLL_MS, WORKER_POLL_MS } from './constants';
 import { allTerminal, isTerminalStatus } from '../utils/runStatus';
 
@@ -97,5 +97,53 @@ export function useTask(id: string | undefined) {
       }
       return failureCount < 2;
     },
+  });
+}
+
+function paramsOf(q: Record<string, unknown>): URLSearchParams {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== null && v !== '') sp.set(k, String(v));
+  }
+  return sp;
+}
+
+export function useRunsList(query: RunListQuery) {
+  return useQuery({
+    queryKey: ['runs', query],
+    queryFn: async (): Promise<PagedResultDto<RunListItemDto>> => {
+      const sp = paramsOf(query as Record<string, unknown>);
+      return (await api.get<PagedResultDto<RunListItemDto>>(`/api/runs?${sp.toString()}`)).data;
+    },
+    refetchInterval: shouldPollRunsList(query) ? RUN_POLL_MS : false,
+  });
+}
+
+function shouldPollRunsList(q: RunListQuery): boolean {
+  if (!q.status) return true;
+  return !['completed', 'failed', 'cancelled'].includes(q.status);
+}
+
+export function useRunBatchesList(query: RunBatchListQuery) {
+  return useQuery({
+    queryKey: ['run-batches-list', query],
+    queryFn: async (): Promise<PagedResultDto<RunBatchListItemDto>> => {
+      const sp = paramsOf(query as Record<string, unknown>);
+      return (await api.get<PagedResultDto<RunBatchListItemDto>>(`/api/run-batches?${sp.toString()}`)).data;
+    },
+    refetchInterval: WORKER_POLL_MS,
+  });
+}
+
+export function useRecentRunsForTask(taskId: string | undefined, limit: number = 5) {
+  return useQuery({
+    queryKey: ['recent-runs', taskId, limit],
+    enabled: !!taskId,
+    queryFn: async (): Promise<RunListItemDto[]> => {
+      const sp = paramsOf({ taskId, page: 1, pageSize: limit });
+      const data = (await api.get<PagedResultDto<RunListItemDto>>(`/api/runs?${sp.toString()}`)).data;
+      return data.items;
+    },
+    staleTime: 10_000,
   });
 }

@@ -137,6 +137,7 @@ export type RunItemDto = {
   id: string;
   taskId: string;
   workerId: string;
+  batchId: string | null;
   status: RunStatus;
   requestedAt: string;
   sentAt: string | null;
@@ -197,4 +198,59 @@ export type RunBatchDetailDto = {
   workerName: string;
   createdAt: string;
   runItems: RunItemDto[];
+};
+
+// ── M3 list + export ──────────────────────────────────────────────────────
+
+export type PagedResultDto<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+export type RunListItemDto = {
+  id: string;
+  taskId: string;
+  taskName: string;
+  workerId: string;
+  workerName: string;
+  batchId: string | null;
+  status: RunStatus;
+  requestedAt: string;
+  completedAt: string | null;
+  iterationLabel: string | null;
+  progressPercent: number | null;
+};
+
+export type RunListQuery = {
+  taskId?: string;
+  workerId?: string;
+  batchId?: string;
+  status?: RunStatus;
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+export type RunBatchListItemDto = {
+  id: string;
+  taskId: string;
+  taskName: string;
+  workerId: string;
+  workerName: string;
+  createdAt: string;
+  totalItems: number;
+  completedCount: number;
+  failedCount: number;
+  pendingCount: number;
+};
+
+export type RunBatchListQuery = {
+  taskId?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
 };

@@ -19,7 +19,7 @@ public class RunServiceTests
     {
         var db = TestDb.CreateInMemory();
         var notifier = new Mock<IWorkerNotifier>(MockBehavior.Strict);
-        var svc = new RunService(db, TestDb.CreateMapper(), notifier.Object, NullLogger<RunService>.Instance);
+        var svc = new RunService(db, TestDb.CreateMapper(), notifier.Object, new RunCsvExporter(), NullLogger<RunService>.Instance);
 
         var user = new User { Id = Guid.NewGuid(), UserName = "u@x", Email = "u@x" };
         db.Users.Add(user);

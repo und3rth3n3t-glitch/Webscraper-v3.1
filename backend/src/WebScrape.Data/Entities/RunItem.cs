@@ -9,6 +9,7 @@ public class RunItem
     public Guid TaskId { get; set; }
     public Guid WorkerId { get; set; }
     public Guid? BatchId { get; set; }
+    public Guid? ScraperConfigId { get; set; }
     public RunItemStatus Status { get; set; } = RunItemStatus.Pending;
     public DateTimeOffset RequestedAt { get; set; }
     public DateTimeOffset? SentAt { get; set; }

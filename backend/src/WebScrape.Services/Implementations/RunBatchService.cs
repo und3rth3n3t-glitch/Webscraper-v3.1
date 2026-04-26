@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using AutoMapper;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +18,7 @@ public class RunBatchService : IRunBatchService
     private readonly IMapper _mapper;
     private readonly IQueueExpansionService _expander;
     private readonly IWorkerNotifier _notifier;
+    private readonly IRunCsvExporter _csv;
     private readonly ILogger<RunBatchService> _log;
 
     public RunBatchService(
@@ -24,12 +26,14 @@ public class RunBatchService : IRunBatchService
         IMapper mapper,
         IQueueExpansionService expander,
         IWorkerNotifier notifier,
+        IRunCsvExporter csv,
         ILogger<RunBatchService> log)
     {
         _db = db;
         _mapper = mapper;
         _expander = expander;
         _notifier = notifier;
+        _csv = csv;
         _log = log;
     }
 
@@ -93,6 +97,7 @@ public class RunBatchService : IRunBatchService
                 TaskId = task.Id,
                 WorkerId = worker.Id,
                 BatchId = batchId,
+                ScraperConfigId = r.ScraperConfigId,
                 Status = RunItemStatus.Pending,
                 RequestedAt = DateTimeOffset.UtcNow,
                 IterationLabel = r.IterationLabel,
@@ -169,5 +174,113 @@ public class RunBatchService : IRunBatchService
             CreatedAt = batch.CreatedAt,
             RunItems = _mapper.Map<List<RunItemDto>>(runItems),
         };
+    }
+
+    public async Task<PagedResultDto<RunBatchListItemDto>> ListAsync(Guid userId, RunBatchListQueryDto query, CancellationToken ct = default)
+    {
+        var page = query.Page < 1 ? 1 : query.Page;
+        var pageSize = query.PageSize switch { < 1 => 1, > 100 => 100, var n => n };
+
+        var q = _db.RunBatches
+            .AsNoTracking()
+            .Include(b => b.Task)
+            .Include(b => b.Worker)
+            .Where(b => b.UserId == userId);
+
+        if (query.TaskId.HasValue) q = q.Where(b => b.TaskId == query.TaskId.Value);
+        if (query.From.HasValue)   q = q.Where(b => b.CreatedAt >= query.From.Value);
+        if (query.To.HasValue)     q = q.Where(b => b.CreatedAt <= query.To.Value);
+
+        var total = await q.CountAsync(ct);
+        var batches = await q
+            .OrderByDescending(b => b.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(ct);
+
+        var batchIds = batches.Select(b => b.Id).ToList();
+        var aggregates = await _db.RunItems
+            .AsNoTracking()
+            .Where(r => r.BatchId != null && batchIds.Contains(r.BatchId!.Value))
+            .GroupBy(r => r.BatchId!.Value)
+            .Select(g => new
+            {
+                BatchId = g.Key,
+                Total = g.Count(),
+                Completed = g.Count(r => r.Status == RunItemStatus.Completed),
+                Failed    = g.Count(r => r.Status == RunItemStatus.Failed || r.Status == RunItemStatus.Cancelled),
+                Pending   = g.Count(r => r.Status == RunItemStatus.Pending || r.Status == RunItemStatus.Sent
+                                      || r.Status == RunItemStatus.Running || r.Status == RunItemStatus.Paused),
+            })
+            .ToListAsync(ct);
+        var aggMap = aggregates.ToDictionary(a => a.BatchId);
+
+        var items = batches.Select(b =>
+        {
+            aggMap.TryGetValue(b.Id, out var a);
+            return new RunBatchListItemDto
+            {
+                Id = b.Id,
+                TaskId = b.TaskId,
+                TaskName = b.Task?.Name ?? "",
+                WorkerId = b.WorkerId,
+                WorkerName = b.Worker?.Name ?? "",
+                CreatedAt = b.CreatedAt,
+                TotalItems = a?.Total ?? 0,
+                CompletedCount = a?.Completed ?? 0,
+                FailedCount = a?.Failed ?? 0,
+                PendingCount = a?.Pending ?? 0,
+            };
+        }).ToList();
+
+        return new PagedResultDto<RunBatchListItemDto>
+        {
+            Items = items, Total = total, Page = page, PageSize = pageSize,
+        };
+    }
+
+    public async Task<RunBatchExportResult> ExportAsync(Guid userId, Guid batchId, string format, CancellationToken ct = default)
+    {
+        var fmt = (format ?? "").ToLowerInvariant();
+        if (fmt != "json" && fmt != "csv")
+            return new RunBatchExportResult(RunBatchExportOutcome.BadFormat, null, null, null);
+
+        var batch = await _db.RunBatches
+            .AsNoTracking()
+            .Include(b => b.Task)
+            .FirstOrDefaultAsync(b => b.Id == batchId, ct);
+        if (batch is null) return new RunBatchExportResult(RunBatchExportOutcome.NotFound, null, null, null);
+        if (batch.UserId != userId) return new RunBatchExportResult(RunBatchExportOutcome.Forbidden, null, null, null);
+
+        var items = await _db.RunItems
+            .AsNoTracking()
+            .Where(r => r.BatchId == batchId)
+            .OrderBy(r => r.RequestedAt)
+            .ToListAsync(ct);
+
+        if (fmt == "json")
+        {
+            var envelope = new StringBuilder();
+            envelope.Append("{\"batchId\":\"").Append(batch.Id).Append("\",\"items\":[");
+            var first = true;
+            foreach (var run in items)
+            {
+                if (!first) envelope.Append(',');
+                first = false;
+                envelope.Append("{\"runId\":\"").Append(run.Id).Append("\",\"iterationLabel\":");
+                envelope.Append(JsonSerializer.Serialize(run.IterationLabel));
+                envelope.Append(",\"status\":");
+                envelope.Append(JsonSerializer.Serialize(run.Status.ToString().ToLowerInvariant()));
+                envelope.Append(",\"result\":");
+                envelope.Append(run.ResultJsonb is null ? "null" : run.ResultJsonb.RootElement.GetRawText());
+                envelope.Append('}');
+            }
+            envelope.Append("]}");
+            var jsonBytes = System.Text.Encoding.UTF8.GetBytes(envelope.ToString());
+            return new RunBatchExportResult(RunBatchExportOutcome.Ok, jsonBytes, $"batch-{batch.Id}.json", "application/json");
+        }
+
+        var csvBytes = _csv.ExportBatch(batch, items, null);
+        return new RunBatchExportResult(RunBatchExportOutcome.Ok, csvBytes, $"batch-{batch.Id}.csv", "text/csv");
     }
 }

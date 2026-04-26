@@ -18,6 +18,13 @@ public class RunsController : ControllerBase
         _runs = runs;
     }
 
+    [HttpGet("")]
+    public async Task<IActionResult> List([FromQuery] RunListQueryDto query, CancellationToken ct)
+    {
+        var page = await _runs.ListAsync(User.GetUserId(), query, ct);
+        return Ok(page);
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
     {
@@ -25,29 +32,44 @@ public class RunsController : ControllerBase
         return dto is null ? NotFound() : Ok(dto);
     }
 
+    [HttpGet("{id:guid}/export")]
+    public async Task<IActionResult> Export(Guid id, [FromQuery] string format, CancellationToken ct)
+    {
+        var result = await _runs.ExportAsync(User.GetUserId(), id, format, ct);
+        return result.Outcome switch
+        {
+            RunExportOutcome.Ok          => File(result.Bytes!, result.ContentType!, result.Filename),
+            RunExportOutcome.BadFormat   => BadRequest(new { error = "format must be 'json' or 'csv'" }),
+            RunExportOutcome.NotFound    => NotFound(),
+            RunExportOutcome.NotReady    => NotFound(new { error = "Run is not yet complete" }),
+            RunExportOutcome.Forbidden   => StatusCode(StatusCodes.Status403Forbidden),
+            RunExportOutcome.NotTabular  => UnprocessableEntity(new { code = "ITERATION_NOT_TABULAR", error = "CSV isn't available for full-page results — use JSON export" }),
+            _                            => StatusCode(StatusCodes.Status500InternalServerError),
+        };
+    }
+
     [HttpPost("batch")]
     [CookieCsrf]
     public async Task<IActionResult> CreateBatch(
-        [FromBody] WebScrape.Data.Dto.CreateBatchDto dto,
-        [FromServices] WebScrape.Services.Interfaces.IRunBatchService batches,
+        [FromBody] CreateBatchDto dto,
+        [FromServices] IRunBatchService batches,
         CancellationToken ct)
     {
         var result = await batches.CreateAndDispatchAsync(User.GetUserId(), dto.TaskId, dto.WorkerId, ct);
         return result.Outcome switch
         {
-            WebScrape.Services.Interfaces.RunBatchOutcome.Created => Ok(new WebScrape.Data.Dto.BatchDispatchResultDto
+            RunBatchOutcome.Created => Ok(new BatchDispatchResultDto
             {
                 BatchId = result.BatchId!.Value,
                 DispatchedCount = result.DispatchedCount,
                 FailedCount = result.FailedCount,
             }),
-            WebScrape.Services.Interfaces.RunBatchOutcome.NotFound => NotFound(new { error = result.Error }),
-            WebScrape.Services.Interfaces.RunBatchOutcome.Forbidden => StatusCode(StatusCodes.Status403Forbidden, new { error = result.Error }),
-            WebScrape.Services.Interfaces.RunBatchOutcome.WorkerOffline => Conflict(new { error = result.Error }),
-            WebScrape.Services.Interfaces.RunBatchOutcome.BatchEmpty => UnprocessableEntity(new { code = "BATCH_EMPTY", error = result.Error }),
-            WebScrape.Services.Interfaces.RunBatchOutcome.BatchTooLarge => UnprocessableEntity(new { code = "BATCH_TOO_LARGE", error = result.Error }),
-            _ => StatusCode(StatusCodes.Status500InternalServerError),
+            RunBatchOutcome.NotFound      => NotFound(new { error = result.Error }),
+            RunBatchOutcome.Forbidden     => StatusCode(StatusCodes.Status403Forbidden, new { error = result.Error }),
+            RunBatchOutcome.WorkerOffline => Conflict(new { error = result.Error }),
+            RunBatchOutcome.BatchEmpty    => UnprocessableEntity(new { code = "BATCH_EMPTY", error = result.Error }),
+            RunBatchOutcome.BatchTooLarge => UnprocessableEntity(new { code = "BATCH_TOO_LARGE", error = result.Error }),
+            _                              => StatusCode(StatusCodes.Status500InternalServerError),
         };
     }
-
 }

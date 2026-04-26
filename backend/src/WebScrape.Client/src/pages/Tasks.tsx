@@ -4,6 +4,7 @@ import { useScraperConfigs, useTasks } from '../api/queries';
 import { useDeleteTask } from '../api/mutations';
 import Modal from '../components/Modal';
 import PopulatePreviewModal from '../components/PopulatePreviewModal';
+import RecentRunsPanel from '../components/RecentRunsPanel';
 import type { TaskDto } from '../api/types';
 import { configNameFor } from '../utils/configLookup';
 
@@ -76,6 +77,7 @@ export default function Tasks() {
                     {t.searchTerms.length} value{t.searchTerms.length === 1 ? '' : 's'}
                   </span>
                 </div>
+                <RecentRunsPanel taskId={t.id} />
               </div>
             );
           })}

@@ -1,0 +1,16 @@
+{
+  "status": "success",
+  "searchTerm": null,
+  "data": [
+    {
+      "blocks": [
+        { "type": "link", "href": "https://en.wikipedia.org/wiki/Main_Page#bodyContent", "text": "Jump to content" },
+        { "type": "list", "listType": "ul", "items": ["Main page", "Contents", "Current events", "Random article"] },
+        { "type": "heading", "level": 1, "text": "Main Page" },
+        { "type": "paragraph", "text": "Welcome to Wikipedia, the free encyclopedia that anyone can edit." }
+      ],
+      "tables": [],
+      "charts": []
+    }
+  ]
+}

@@ -71,6 +71,7 @@ builder.Services.AddAuthorization();
 
 builder.Services.AddSingleton<IApiKeyHasher, Argon2idApiKeyHasher>();
 builder.Services.AddSingleton<IApiKeyTokenGenerator, ApiKeyTokenGenerator>();
+builder.Services.AddSingleton<IRunCsvExporter, RunCsvExporter>();
 
 builder.Services.AddScoped<IApiKeyService, ApiKeyService>();
 builder.Services.AddScoped<IWorkerService, WorkerService>();

@@ -37,6 +37,10 @@ public class AutoMapperProfile : Profile
 
         CreateMap<RunItem, RunItemDto>()
             .ForMember(d => d.Result, o => o.MapFrom(s => s.ResultJsonb != null ? s.ResultJsonb.RootElement : (JsonElement?)null));
+
+        CreateMap<RunItem, RunListItemDto>()
+            .ForMember(d => d.TaskName,   o => o.MapFrom(s => s.Task != null ? s.Task.Name : ""))
+            .ForMember(d => d.WorkerName, o => o.MapFrom(s => s.Worker != null ? s.Worker.Name : ""));
     }
 
     // Returns null if the stored JSONB is shaped wrong for this block type (corrupt row).
