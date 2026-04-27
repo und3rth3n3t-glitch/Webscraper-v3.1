@@ -600,10 +600,19 @@ export default defineBackground(() => {
       'ELEMENT_PICKED', 'ELEMENT_HOVER', 'PICKER_CANCELLED', 'PONG',
       'FLOW_PROGRESS', 'FLOW_COMPLETE', 'FLOW_ERROR',
       'CLOUDFLARE_DETECTED', 'FLOW_PAUSED', 'FLOW_RESUMED',
+      'FLOW_PREFLIGHT_READY',
       'NETWORK_CALL_CAPTURED', 'PAGE_INFO',
       'SCAN_PROGRESS', 'SCAN_COMPLETE', 'SCAN_ERROR',
     ];
     if (contentToSidepanel.includes(type)) {
+      if (type === 'FLOW_PREFLIGHT_READY') {
+        const p = (message.payload ?? {}) as { taskId?: string };
+        const record = p.taskId ? scheduler.getActiveTask(p.taskId) : undefined;
+        console.warn('[SW] FLOW_PREFLIGHT_READY | taskId:', p.taskId, '| recordKnown:', !!record);
+        // PR4 will transition the task in the scheduler here. PR3 just logs
+        // and falls through to the relay — sidepanel can already subscribe
+        // (PR5) without further wiring.
+      }
       if (type === 'FLOW_RESUMED') {
         console.warn('[SW] FLOW_RESUMED relayed | activeTaskId:', scheduler.getFirstActive()?.task.id);
       }

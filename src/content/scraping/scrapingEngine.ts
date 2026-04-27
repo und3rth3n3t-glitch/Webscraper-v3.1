@@ -31,6 +31,8 @@ import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
 import { waitForChallengeToClear } from '../cloudflareDetector';
 import { evaluateDetectionRules, runDetectorWatchdog } from '../detectionRules';
 import { MessageType, PauseReason, DetectionTrigger } from '../../types/messages';
+import { PreflightTimer } from './preflightTimer';
+import { PREFLIGHT_QUIET_MS } from './constants';
 import type { AutoDetectConfig } from '../../types/config';
 import type {
   ScraperConfig,
@@ -51,6 +53,13 @@ import type { ScrapingResult } from '../../types/extraction';
 
 let abortSignal = false;
 let flowRunning = false;
+
+// One PreflightTimer per executeFlow() invocation. Set in executeFlow's
+// entry block, cleared in the finally. Module-scope so the
+// FORCE_PREFLIGHT_READY listener (registered once per content-script
+// load) can reach the active flow's timer. Null when no flow is running
+// or when the active flow has no taskId (sidepanel-only mode).
+let activePreflightTimer: PreflightTimer | null = null;
 
 // Runtime-toggleable: when true, scrape output includes verbose diagnostic
 // fields (saved-descriptor dumps on chart-resolution failures, etc.). The
@@ -74,6 +83,24 @@ try {
     if (!change) return;
     const next = (change.newValue as Record<string, unknown> | undefined) || {};
     DEBUG = !!next.debug;
+  });
+} catch { /* expected: SW restart timing */ }
+
+try {
+  browser.runtime.onMessage.addListener((msg: unknown) => {
+    const m = msg as Record<string, unknown> | null;
+    if (m?.type !== MessageType.FORCE_PREFLIGHT_READY) return;
+    const payload = (m.payload ?? {}) as { taskId?: string };
+    const t = activePreflightTimer;
+    if (!t) {
+      swLog('[FORCE_PREFLIGHT_READY] ignored — no active timer | requestedTaskId:', payload.taskId);
+      return;
+    }
+    if (payload.taskId && payload.taskId !== t.taskId) {
+      swLog('[FORCE_PREFLIGHT_READY] ignored — taskId mismatch | requested:', payload.taskId, '| active:', t.taskId);
+      return;
+    }
+    t.force();
   });
 } catch { /* expected: SW restart timing */ }
 
@@ -122,6 +149,22 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
   }
   flowRunning = true;
   abortSignal = false;
+
+  // Pre-flight quiet timer: armed only for queue-mode flows (taskId set).
+  // Sidepanel-only flows (no taskId) have no batch concept and skip the
+  // timer entirely. Cancelled/re-armed by every detector pause and
+  // explicitly cleared in the outer finally.
+  if (taskId) {
+    activePreflightTimer = new PreflightTimer({
+      taskId,
+      durationMs: PREFLIGHT_QUIET_MS,
+      emit: (msg) => {
+        browser.runtime.sendMessage(msg).catch(() => { /* SW asleep — drop */ });
+      },
+    });
+    activePreflightTimer.arm();
+    swLog('[preflightTimer] armed | taskId:', taskId, '| durationMs:', PREFLIGHT_QUIET_MS);
+  }
 
   const startTime = Date.now();
 
@@ -377,6 +420,10 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
   } finally {
     swLog('[executeFlow] finally â€” clearing flowRunning | taskId:', taskId);
     flowRunning = false;
+    if (activePreflightTimer) {
+      activePreflightTimer.cancel();
+      activePreflightTimer = null;
+    }
     // Cancel any lingering pause-continuation. End-of-flow cleanup so a
     // stale continuation can't fire on a future tab navigation.
     try {
@@ -442,6 +489,10 @@ async function runWatchdogPause(
   swLog('[watchdog] result | fired:', result.fired, '| trigger:', result.trigger, '| cfg:', cfg);
   if (!result.fired) return;
 
+  // Reset the pre-flight quiet window: a detector just fired, so the page
+  // is not yet stable. Re-armed below after the user clicks Continue.
+  activePreflightTimer?.cancel();
+
   swLog('[watchdog] fired | taskId:', taskId, '| trigger:', result.trigger, '| url:', window.location.href);
 
   // Register a pause-continuation pointing at the current leg. If the user
@@ -483,6 +534,10 @@ async function runWatchdogPause(
   }
 
   swLog('[watchdog] cleared/resumed | taskId:', taskId);
+  // Restart the pre-flight quiet window: the user just cleared the gate;
+  // give the page another full PREFLIGHT_QUIET_MS to settle before
+  // declaring the task pre-flight ready.
+  activePreflightTimer?.arm();
   browser.runtime.sendMessage({ type: MessageType.FLOW_RESUMED });
 }
 
@@ -882,6 +937,10 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
     return null;
   }
 
+  // Reset the pre-flight quiet window: a config-driven detection fired,
+  // so the page isn't stable. Re-armed below after the user resumes.
+  activePreflightTimer?.cancel();
+
   onProgress?.(`Waiting for user: ${opts.message}`);
 
   browser.runtime.sendMessage({
@@ -897,6 +956,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
 
   await waitForResumeSignal();
   swLog('[awaitUserAction] resume signal received | taskId:', taskId);
+  activePreflightTimer?.arm();
 
   browser.runtime.sendMessage({ type: MessageType.FLOW_RESUMED });
   return null;
