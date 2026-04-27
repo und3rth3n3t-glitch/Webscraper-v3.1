@@ -28,8 +28,10 @@ import { paginatePages, paginateElement } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { swLog } from '../../utils/swLog';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
-import { detectCloudflareChallenge, waitForChallengeToClear } from '../cloudflareDetector';
-import { evaluateDetectionRules } from '../detectionRules';
+import { waitForChallengeToClear } from '../cloudflareDetector';
+import { evaluateDetectionRules, runDetectorWatchdog } from '../detectionRules';
+import { MessageType, PauseReason, DetectionTrigger } from '../../types/messages';
+import type { AutoDetectConfig } from '../../types/config';
 import type {
   ScraperConfig,
   Step,
@@ -222,20 +224,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
             swLog('[executeFlow] step OK  | taskId:', taskId, '| stepIndex:', si, '| type:', step.type, '| stepData keys:', stepData ? Object.keys(stepData) : null, '| url:', window.location.href);
 
             if (isNavigating) {
-              // Check for cloudflare after navigation
-              const challenge = detectCloudflareChallenge();
-              if (challenge.detected && challenge.type) {
-                swLog('[executeFlow] cloudflare detected post-navigate | taskId:', taskId, '| type:', challenge.type);
-                browser.runtime.sendMessage({
-                  type: 'FLOW_PAUSED',
-                  payload: { reason: 'cloudflare', challengeType: challenge.type, taskId },
-                });
-
-                await Promise.race([waitForChallengeToClear().promise, waitForResumeSignal()]);
-                swLog('[executeFlow] cloudflare cleared/resumed | taskId:', taskId);
-
-                browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
-              }
+              await runWatchdogPause(config.autoDetect, taskId);
             }
           } finally {
             // Always cancel the continuation for navigating steps â€” including when
@@ -323,14 +312,62 @@ function waitForResumeSignal(): Promise<void> {
   swLog('[waitForResumeSignal] arming listener');
   return new Promise((resolve) => {
     const handler = (msg: unknown): void => {
-      if ((msg as Record<string, unknown>)?.type === 'RESUME_AFTER_CLOUDFLARE') {
-        swLog('[waitForResumeSignal] RESUME_AFTER_CLOUDFLARE received');
+      const t = (msg as Record<string, unknown>)?.type;
+      // Accept both new MessageType.RESUME_AFTER_PAUSE and legacy RESUME_AFTER_CLOUDFLARE
+      if (t === MessageType.RESUME_AFTER_PAUSE || t === 'RESUME_AFTER_CLOUDFLARE') {
+        swLog('[waitForResumeSignal] resume received | type:', t);
         browser.runtime.onMessage.removeListener(handler);
         resolve();
       }
     };
     browser.runtime.onMessage.addListener(handler);
   });
+}
+
+function messageForTrigger(trigger: DetectionTrigger): string {
+  switch (trigger) {
+    case DetectionTrigger.LOGIN_WALL:       return 'Sign in to continue.';
+    case DetectionTrigger.COOKIE_BANNER:    return 'Dismiss the cookie banner to continue.';
+    case DetectionTrigger.CAPTCHA:          return 'Solve the captcha to continue.';
+    case DetectionTrigger.CUSTOM_SELECTOR:  return 'Action needed in your browser.';
+    default:                                return 'Action needed in your browser.';
+  }
+}
+
+// Post-navigation watchdog. Wire-protocol decision:
+//   - cloudflare uses reason='cloudflare' (existing dispatcher routes to CloudflarePauseAlert + auto-clear race)
+//   - everything else uses reason='awaitUserAction' with a trigger field (existing dispatcher routes to AwaitActionPauseAlert)
+// PR4 will rationalise the taxonomy once the dispatcher is rewritten.
+async function runWatchdogPause(
+  cfg: AutoDetectConfig | undefined,
+  taskId: string | undefined,
+): Promise<void> {
+  const result = runDetectorWatchdog(cfg);
+  if (!result.fired) return;
+
+  swLog('[watchdog] fired | taskId:', taskId, '| trigger:', result.trigger, '| url:', window.location.href);
+
+  if (result.trigger === DetectionTrigger.CLOUDFLARE) {
+    browser.runtime.sendMessage({
+      type: MessageType.FLOW_PAUSED,
+      payload: { reason: PauseReason.CLOUDFLARE, taskId },
+    });
+    await Promise.race([waitForChallengeToClear().promise, waitForResumeSignal()]);
+  } else {
+    browser.runtime.sendMessage({
+      type: MessageType.FLOW_PAUSED,
+      payload: {
+        reason: PauseReason.AWAIT_USER_ACTION,
+        trigger: result.trigger,
+        message: messageForTrigger(result.trigger),
+        taskId,
+      },
+    });
+    await waitForResumeSignal();
+  }
+
+  swLog('[watchdog] cleared/resumed | taskId:', taskId);
+  browser.runtime.sendMessage({ type: MessageType.FLOW_RESUMED });
 }
 
 // â”€â”€ Wait after action â”€â”€
@@ -732,9 +769,9 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
   onProgress?.(`Waiting for user: ${opts.message}`);
 
   browser.runtime.sendMessage({
-    type: 'FLOW_PAUSED',
+    type: MessageType.FLOW_PAUSED,
     payload: {
-      reason: 'awaitUserAction',
+      reason: PauseReason.AWAIT_USER_ACTION,
       trigger: evalResult.trigger,
       message: opts.message,
       taskId,
@@ -744,7 +781,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
   await waitForResumeSignal();
   swLog('[awaitUserAction] resume signal received | taskId:', taskId);
 
-  browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
+  browser.runtime.sendMessage({ type: MessageType.FLOW_RESUMED });
   return null;
 }
 

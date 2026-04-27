@@ -131,7 +131,17 @@ export interface CaptureApiCallsOptions {
 export interface DetectionRules {
   loginWall?: boolean;
   captcha?: boolean;
+  cookieBanner?: boolean;
   selector?: string;
+  extraSelectors?: string[];
+}
+
+export interface AutoDetectConfig {
+  cloudflare?: boolean;
+  loginWall?: boolean;
+  captcha?: boolean;
+  cookieBanner?: boolean;
+  extraSelectors?: string[];
 }
 
 export interface AwaitUserActionOptions {
@@ -196,7 +206,8 @@ export interface ScraperConfig {
   url: string;
   steps: Step[];
   dataMapping?: DataMapping;
-  schemaVersion: 3 | 4;
+  autoDetect?: AutoDetectConfig;
+  schemaVersion: 3 | 4 | 5;
   createdAt: number;
   updatedAt: number;
   shared?: boolean;

@@ -15,8 +15,8 @@ export type ContentToSidepanelMessage =
   | { type: 'FLOW_ERROR';             payload: { error: string; stepLabel?: string; taskId?: string } }
   | { type: 'CLOUDFLARE_DETECTED';    payload: { challengeType: CloudflareChallengeType; taskId?: string } }
   | { type: 'FLOW_PAUSED';            payload:
-        | { reason: 'cloudflare'; challengeType: CloudflareChallengeType; taskId?: string }
-        | { reason: 'awaitUserAction'; trigger: 'loginWall' | 'captcha' | 'selector' | 'unconditional'; message: string; taskId?: string } }
+        | { reason: 'cloudflare'; challengeType?: CloudflareChallengeType; taskId?: string }
+        | { reason: 'awaitUserAction'; trigger: DetectionTrigger; message: string; taskId?: string } }
   | { type: 'FLOW_RESUMED' }
   | { type: 'NETWORK_CALL_CAPTURED';  payload: ApiCall }
   | { type: 'PAGE_INFO';              payload: { url: string; title: string } }
@@ -30,6 +30,7 @@ export type SidepanelToContentMessage =
   | { type: 'EXECUTE_FLOW';           payload: { config: import('./config').ScraperConfig; searchTerms: string[]; taskId?: string } }
   | { type: 'ABORT_FLOW' }
   | { type: 'RESUME_AFTER_CLOUDFLARE' }
+  | { type: 'RESUME_AFTER_PAUSE' }
   | { type: 'HIGHLIGHT_ELEMENT';      payload: { descriptor: SelectorDescriptor } }
   | { type: 'UNHIGHLIGHT_ELEMENT' }
   | { type: 'GET_PAGE_INFO' }
@@ -55,3 +56,38 @@ export type OffscreenToSwMessage =
   | { type: 'RESUME_TASK';            payload: { taskId: string } }
   | { type: 'CANCEL_TASK';            payload: { taskId: string } }
   | { type: 'CONNECTION_STATUS';      payload: { status: ConnectionStatus; error?: string } };
+
+// ── Typed string constants (replace magic literals in content/SW code) ────────
+
+export const MessageType = {
+  EXECUTE_FLOW: 'EXECUTE_FLOW',
+  FLOW_PROGRESS: 'FLOW_PROGRESS',
+  FLOW_COMPLETE: 'FLOW_COMPLETE',
+  FLOW_ERROR: 'FLOW_ERROR',
+  FLOW_PAUSED: 'FLOW_PAUSED',
+  FLOW_RESUMED: 'FLOW_RESUMED',
+  RESUME_AFTER_PAUSE: 'RESUME_AFTER_PAUSE',
+  REGISTER_CONTINUATION: 'REGISTER_CONTINUATION',
+  CANCEL_CONTINUATION: 'CANCEL_CONTINUATION',
+} as const;
+export type MessageType = typeof MessageType[keyof typeof MessageType];
+
+// FLOW_PAUSED.payload.reason — wire protocol; existing dispatcher only
+// recognises these two. Do not add new values without updating the dispatcher.
+export const PauseReason = {
+  CLOUDFLARE: 'cloudflare',
+  AWAIT_USER_ACTION: 'awaitUserAction',
+} as const;
+export type PauseReason = typeof PauseReason[keyof typeof PauseReason];
+
+// Detector trigger detail (carried in FLOW_PAUSED.payload.trigger when
+// reason === 'awaitUserAction'). Independent of the protocol reason.
+export const DetectionTrigger = {
+  CLOUDFLARE: 'cloudflare',
+  LOGIN_WALL: 'loginWall',
+  CAPTCHA: 'captcha',
+  COOKIE_BANNER: 'cookieBanner',
+  CUSTOM_SELECTOR: 'customSelector',
+  UNCONDITIONAL: 'unconditional',
+} as const;
+export type DetectionTrigger = typeof DetectionTrigger[keyof typeof DetectionTrigger];

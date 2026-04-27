@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { evaluateDetectionRules } from '../content/detectionRules';
+import { evaluateDetectionRules, runDetectorWatchdog } from '../content/detectionRules';
+import { DetectionTrigger } from '../types/messages';
 
 function setBody(html: string): void {
   document.body.innerHTML = html;
@@ -57,7 +58,7 @@ describe('evaluateDetectionRules', () => {
 
   it('selector fires when present', () => {
     setBody('<div id="cookie-banner"></div>');
-    expect(evaluateDetectionRules({ selector: '#cookie-banner' })).toEqual({ fired: true, trigger: 'selector' });
+    expect(evaluateDetectionRules({ selector: '#cookie-banner' })).toEqual({ fired: true, trigger: DetectionTrigger.CUSTOM_SELECTOR });
   });
 
   it('selector does not fire when absent', () => {
@@ -81,5 +82,86 @@ describe('evaluateDetectionRules', () => {
     expect(
       evaluateDetectionRules({ loginWall: true, captcha: true, selector: '#cookie-banner' })
     ).toEqual({ fired: true, trigger: 'loginWall' });
+  });
+
+  it('cookieBanner fires when banner present', () => {
+    setBody('<div id="onetrust-banner-sdk">Accept cookies</div>');
+    const el = document.querySelector('#onetrust-banner-sdk')!;
+    Object.defineProperty(el, 'offsetParent', { configurable: true, get: () => document.body });
+    (el as HTMLElement).getBoundingClientRect = () => ({ width: 100, height: 50, x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 50, toJSON: () => ({}) } as DOMRect);
+    expect(evaluateDetectionRules({ cookieBanner: true })).toEqual({ fired: true, trigger: DetectionTrigger.COOKIE_BANNER });
+  });
+
+  it('extraSelectors fires when matching element present', () => {
+    setBody('<div class="custom-block">Blocked</div>');
+    expect(evaluateDetectionRules({ extraSelectors: ['.custom-block'] })).toEqual({ fired: true, trigger: DetectionTrigger.CUSTOM_SELECTOR });
+  });
+
+  it('extraSelectors empty does not gate the pause (unconditional back-compat)', () => {
+    setBody('');
+    expect(evaluateDetectionRules({ extraSelectors: [] })).toEqual({ fired: true, trigger: DetectionTrigger.UNCONDITIONAL });
+  });
+});
+
+// ── runDetectorWatchdog ───────────────────────────────────────────────────────
+
+function stubVisible(el: Element): void {
+  Object.defineProperty(el, 'offsetParent', { configurable: true, get: () => document.body });
+  Object.defineProperty(el, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({ width: 200, height: 20, x: 0, y: 0, top: 0, left: 0, right: 200, bottom: 20, toJSON: () => ({}) } as DOMRect),
+  });
+}
+
+describe('runDetectorWatchdog', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    document.title = '';
+    Object.defineProperty(HTMLElement.prototype, 'offsetParent', { configurable: true, get() { return document.body; } });
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true, value() { return { width: 100, height: 50, top: 0, left: 0, right: 100, bottom: 50 } as DOMRect; },
+    });
+  });
+
+  it('returns no fire on clean page', () => {
+    expect(runDetectorWatchdog()).toEqual({ fired: false, trigger: DetectionTrigger.UNCONDITIONAL });
+  });
+
+  it('detects cloudflare via challenge form', () => {
+    document.body.innerHTML = '<form id="challenge-form"></form>';
+    expect(runDetectorWatchdog()).toEqual({ fired: true, trigger: DetectionTrigger.CLOUDFLARE });
+  });
+
+  it('detects login wall via password input', () => {
+    document.body.innerHTML = '<input type="password" />';
+    stubVisible(document.querySelector('input')!);
+    expect(runDetectorWatchdog()).toEqual({ fired: true, trigger: DetectionTrigger.LOGIN_WALL });
+  });
+
+  it('detects cookie banner', () => {
+    document.body.innerHTML = '<div id="onetrust-banner-sdk">Cookies</div>';
+    stubVisible(document.querySelector('#onetrust-banner-sdk')!);
+    expect(runDetectorWatchdog()).toEqual({ fired: true, trigger: DetectionTrigger.COOKIE_BANNER });
+  });
+
+  it('cloudflare wins over loginWall (priority order)', () => {
+    document.body.innerHTML = '<form id="challenge-form"><input type="password"/></form>';
+    expect(runDetectorWatchdog()).toEqual({ fired: true, trigger: DetectionTrigger.CLOUDFLARE });
+  });
+
+  it('respects autoDetect.cloudflare = false', () => {
+    document.body.innerHTML = '<form id="challenge-form"></form>';
+    expect(runDetectorWatchdog({ cloudflare: false })).toEqual({ fired: false, trigger: DetectionTrigger.UNCONDITIONAL });
+  });
+
+  it('fires on extraSelectors match', () => {
+    document.body.innerHTML = '<div class="custom-block">Blocked</div>';
+    expect(runDetectorWatchdog({ extraSelectors: ['.custom-block'] }))
+      .toEqual({ fired: true, trigger: DetectionTrigger.CUSTOM_SELECTOR });
+  });
+
+  it('skips extraSelectors when list is empty', () => {
+    document.body.innerHTML = '<div></div>';
+    expect(runDetectorWatchdog({ extraSelectors: [] })).toEqual({ fired: false, trigger: DetectionTrigger.UNCONDITIONAL });
   });
 });
