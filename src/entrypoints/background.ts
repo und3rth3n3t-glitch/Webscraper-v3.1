@@ -1,7 +1,6 @@
 import { dbg, ensureDebugInit } from '../utils/debugLog';
 import { mergeProgress } from '../utils/queueProgress';
 import type { QueueTask } from '../types/signalr';
-import type { DataMapping } from '../types/config';
 import { getAllConfigs, saveConfig, PREFS_KEY } from '../sidepanel/utils/storage';
 import { resolveQueueTask, ConfigNotFoundError } from '../background/remoteTaskHandler';
 import {
@@ -9,6 +8,8 @@ import {
   type ActiveTaskContext, type FlowProgressPayload, type FlowCompletePayload,
   type FlowErrorPayload, type FlowPausedPayload,
 } from '../background/flowEventToHubPayload';
+import { Scheduler, type PersistedActiveRecord } from '../background/scheduler';
+import { originOf } from '../background/originOf';
 
 export default defineBackground(() => {
   ensureDebugInit();
@@ -26,22 +27,55 @@ export default defineBackground(() => {
   }
 
   // ── Remote queue state ──
+  //
+  // Scheduler owns the per-task records (active Map, pending queue, recent
+  // history, single-flight `starting` gate). `activePauseState` is kept as a
+  // thin singleton mirror for the App.tsx GET_PAUSE_STATE handshake, the
+  // continuation-hold check in tabs.onUpdated, and sidepanel-only-mode runs
+  // (which bypass the scheduler). PR4 will move pause state per-task.
 
-  const RECENT_TASKS_CAP = 20;
-  let activeRemoteTask: { task: QueueTask; tabId: number; windowId: number; resolvedDataMapping?: DataMapping; lastProgress?: { stepLabel: string; termIndex?: number } } | null = null;
-  let recentRemoteTasks: QueueTask[] = [];
-  let isStartingTask = false;
-  const pendingRemoteTasks: QueueTask[] = [];
-  let activePauseState: { reason: 'cloudflare' | 'awaitUserAction'; message?: string } | null = null;
+  const scheduler = new Scheduler({
+    startTask: (task) => {
+      // startRemoteTask handles its own resolver/window-create failures via
+      // scheduler.recordStartFailed. The .catch here is a backstop for
+      // unforeseen rejections from chrome APIs that escape those handlers —
+      // matches HEAD's defensive logging pattern.
+      startRemoteTask(task).catch((err) => console.error('[SW] startRemoteTask failed:', err));
+    },
+  });
+
+  let activePauseState: {
+    reason: 'cloudflare' | 'awaitUserAction';
+    message?: string;
+    trigger?: import('../types/messages').DetectionTrigger;
+    domain?: string;
+  } | null = null;
   type SignalRConfig = { serverUrl: string; token: string; clientId: string; version: string };
   let signalrConfig: SignalRConfig | null = null;
 
+  function persistActive(): void {
+    chrome.storage.session.set({ activeRemoteTasks: scheduler.serializeActive() }).catch(() => {});
+  }
+
+  function persistRecent(): void {
+    chrome.storage.session.set({ recentRemoteTasks: scheduler.getRecent() }).catch(() => {});
+  }
+
   // Restore state from session storage on SW restart (state is lost when SW is killed by Chrome).
-  chrome.storage.session.get(['signalrConfig', 'activeRemoteTask', 'recentRemoteTasks']).then((data: Record<string, unknown>) => {
+  chrome.storage.session.get(['signalrConfig', 'activeRemoteTasks', 'recentRemoteTasks']).then((data: Record<string, unknown>) => {
     if (data.signalrConfig) signalrConfig = data.signalrConfig as SignalRConfig;
-    if (data.activeRemoteTask) activeRemoteTask = data.activeRemoteTask as typeof activeRemoteTask;
-    if (data.recentRemoteTasks) recentRemoteTasks = data.recentRemoteTasks as QueueTask[];
+    if (Array.isArray(data.activeRemoteTasks)) {
+      scheduler.restoreActive(data.activeRemoteTasks as PersistedActiveRecord[]);
+    }
+    if (Array.isArray(data.recentRemoteTasks)) {
+      scheduler.setRecent(data.recentRemoteTasks as QueueTask[]);
+    }
   }).catch(() => {});
+
+  // One-shot cleanup of the pre-PR2 singular key. chrome.storage.session is
+  // wiped on browser restart, so this only matters for an in-place extension
+  // reload during the upgrade window. Safe to remove this line in PR3+.
+  chrome.storage.session.remove('activeRemoteTask').catch(() => {});
 
   // Debug-mode flag (mirrors the toggle read by scrapingEngine.ts). Read
   // fresh at decision time inside drainNextRemoteTask — caching it at SW
@@ -156,21 +190,14 @@ export default defineBackground(() => {
     send().catch((err) => console.error('[SW] Failed to relay hub invocation:', type, err));
   }
 
-  function pushToRecent(task: QueueTask): void {
-    const idx = recentRemoteTasks.findIndex((t) => t.id === task.id);
-    if (idx !== -1) recentRemoteTasks.splice(idx, 1);
-    recentRemoteTasks.unshift(task);
-    if (recentRemoteTasks.length > RECENT_TASKS_CAP) recentRemoteTasks.length = RECENT_TASKS_CAP;
-    chrome.storage.session.set({ recentRemoteTasks }).catch(() => {});
-  }
-
   function buildSnapshotActiveTask(): QueueTask | null {
-    if (!activeRemoteTask) return null;
+    const r = scheduler.getFirstActive();
+    if (!r) return null;
     return {
-      ...activeRemoteTask.task,
+      ...r.task,
       status: activePauseState ? 'paused' : 'running',
       pausedReason: activePauseState?.reason,
-      progress: activeRemoteTask.lastProgress,
+      progress: r.lastProgress,
     };
   }
 
@@ -192,7 +219,7 @@ export default defineBackground(() => {
         error: message,
         failedAt: new Date().toISOString(),
       });
-      drainNextRemoteTask();
+      scheduler.recordStartFailed(task.id);
       return;
     }
 
@@ -205,18 +232,18 @@ export default defineBackground(() => {
         error: "Couldn't open a window for the task",
         failedAt: new Date().toISOString(),
       });
-      drainNextRemoteTask();
+      scheduler.recordStartFailed(task.id);
       return;
     }
 
-    activeRemoteTask = {
-      task: { ...task, status: 'running' },
+    // Register early so tabs.onRemoved during page load can identify the task.
+    scheduler.recordStarted(task.id, task, {
       tabId: tab.id,
       windowId: win.id,
+      origin: originOf(resolved.config.url),
       resolvedDataMapping: resolved.config.dataMapping,
-    };
-    isStartingTask = false;
-    chrome.storage.session.set({ activeRemoteTask }).catch(() => {});
+    });
+    persistActive();
     lastFocusedTabId = tab.id;
 
     await waitForTabComplete(tab.id);
@@ -236,96 +263,99 @@ export default defineBackground(() => {
         error: `Couldn't dispatch task to page: ${err.message}`,
         failedAt: new Date().toISOString(),
       });
-      activeRemoteTask = null;
-      drainNextRemoteTask();
+      drainNextRemoteTask(resolved.taskId, 'failed');
     });
   }
 
-  function drainNextRemoteTask(completedStatus: 'completed' | 'failed' = 'failed'): void {
+  // PR2: now requires the taskId — we no longer have a hidden singleton to drain.
+  // Callers that previously called drainNextRemoteTask() with no args (catastrophic
+  // failures during start) now use scheduler.recordStartFailed instead, since at
+  // start-time there is no scheduler record yet to remove.
+  function drainNextRemoteTask(taskId: string, completedStatus: 'completed' | 'failed' = 'failed'): void {
     activePauseState = null;
-    const closingWindowId = activeRemoteTask?.windowId;
-    const closingTaskId = activeRemoteTask?.task.id;
-    if (activeRemoteTask) {
-      pushToRecent({ ...activeRemoteTask.task, status: completedStatus, pausedReason: undefined });
+    const closing = scheduler.endTask(taskId);
+    if (!closing) {
+      // No record — nothing to clean up. tryStartNext is already a no-op when
+      // active < cap and pending is empty, so we don't need to call it here.
+      return;
     }
-    activeRemoteTask = null;
-    isStartingTask = false;
-    chrome.storage.session.remove('activeRemoteTask').catch(() => {});
+    scheduler.pushRecent({ ...closing.task, status: completedStatus, pausedReason: undefined });
+    persistActive();
+    persistRecent();
 
-    if (closingWindowId) {
-      isDebugMode().then((debug) => {
-        if (debug) {
-          console.warn('[SW] DEBUG mode — leaving task window open | windowId:', closingWindowId, '| taskId:', closingTaskId);
-        } else {
-          browser.windows.remove(closingWindowId).catch(() => {});
-        }
-      }).catch(() => {
+    const closingWindowId = closing.windowId;
+    const closingTaskId = closing.task.id;
+    isDebugMode().then((debug) => {
+      if (debug) {
+        console.warn('[SW] DEBUG mode — leaving task window open | windowId:', closingWindowId, '| taskId:', closingTaskId);
+      } else {
         browser.windows.remove(closingWindowId).catch(() => {});
-      });
-    }
-
-    const next = pendingRemoteTasks.shift();
-    if (next) {
-      isStartingTask = true;
-      startRemoteTask(next).catch((err) => console.error('[SW] Failed to start queued task:', err));
-    }
+      }
+    }).catch(() => {
+      browser.windows.remove(closingWindowId).catch(() => {});
+    });
   }
 
   function handleRemoteFlowEvent(type: string, payload: Record<string, unknown>): void {
-    if (!activeRemoteTask) {
-      console.warn('[SW] handleRemoteFlowEvent: no activeRemoteTask, dropping', type);
+    const taskId = payload?.taskId as string | undefined;
+    if (!taskId) {
+      // Sidepanel-mode runs (no taskId) — handled elsewhere or not relevant
+      // to the queue path. Silently ignore.
       return;
     }
-    if (payload?.taskId !== activeRemoteTask.task.id) {
-      console.warn('[SW] handleRemoteFlowEvent: taskId mismatch — got', payload?.taskId, 'expected', activeRemoteTask.task.id, 'dropping', type);
+    const record = scheduler.getActiveTask(taskId);
+    if (!record) {
+      console.warn('[SW] handleRemoteFlowEvent: no record for taskId', taskId, 'dropping', type);
       return;
     }
 
     const ctx: ActiveTaskContext = {
-      taskId: activeRemoteTask.task.id,
-      configId: activeRemoteTask.task.configId,
-      configName: activeRemoteTask.task.configName,
-      searchTerms: activeRemoteTask.task.searchTerms,
-      dataMapping: activeRemoteTask.resolvedDataMapping,
+      taskId: record.task.id,
+      configId: record.task.configId,
+      configName: record.task.configName,
+      searchTerms: record.task.searchTerms,
+      dataMapping: record.resolvedDataMapping,
     };
 
     switch (type) {
       case 'FLOW_PROGRESS': {
         const hubPayload = mapFlowProgress(ctx, payload as unknown as FlowProgressPayload);
         relayHubInvocation('SEND_TASK_PROGRESS', hubPayload);
-        const merged = mergeProgress(activeRemoteTask.lastProgress ?? null, {
+        const merged = mergeProgress(record.lastProgress ?? null, {
           stepLabel: (payload as Record<string, unknown>).stepLabel,
           termIndex: (payload as Record<string, unknown>).termIndex,
         });
         if (merged) {
-          activeRemoteTask.lastProgress = merged;
-          chrome.storage.session.set({ activeRemoteTask }).catch(() => {});
+          scheduler.setProgress(taskId, merged);
+          persistActive();
         }
         return;
       }
       case 'FLOW_COMPLETE': {
         const fp = payload as unknown as FlowCompletePayload;
-        console.warn('[SW] FLOW_COMPLETE | taskId:', activeRemoteTask.task.id, '| aborted:', fp.result?.aborted, '| iterations:', fp.result?.iterations?.length, '| totalTimeMs:', fp.result?.totalTimeMs);
+        console.warn('[SW] FLOW_COMPLETE | taskId:', record.task.id, '| aborted:', fp.result?.aborted, '| iterations:', fp.result?.iterations?.length, '| totalTimeMs:', fp.result?.totalTimeMs);
         const hubPayload = mapFlowComplete(ctx, fp);
         relayHubInvocation('SEND_TASK_COMPLETE', hubPayload);
-        drainNextRemoteTask('completed');
+        drainNextRemoteTask(taskId, 'completed');
         return;
       }
       case 'FLOW_ERROR': {
         const fe = payload as unknown as FlowErrorPayload;
-        console.warn('[SW] FLOW_ERROR | taskId:', activeRemoteTask.task.id, '| error:', fe.error);
+        console.warn('[SW] FLOW_ERROR | taskId:', record.task.id, '| error:', fe.error);
         const hubPayload = mapFlowError(ctx, fe);
         relayHubInvocation('SEND_TASK_ERROR', hubPayload);
-        drainNextRemoteTask();
+        drainNextRemoteTask(taskId, 'failed');
         return;
       }
       case 'FLOW_PAUSED': {
-        const flowPayload = payload as { reason?: string; message?: string };
-        console.warn('[SW] FLOW_PAUSED | taskId:', activeRemoteTask.task.id, '| reason:', flowPayload.reason, '| message:', flowPayload.message);
+        const flowPayload = payload as { reason?: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string };
+        console.warn('[SW] FLOW_PAUSED | taskId:', record.task.id, '| reason:', flowPayload.reason, '| message:', flowPayload.message, '| trigger:', flowPayload.trigger, '| domain:', flowPayload.domain);
         if (flowPayload.reason !== 'cloudflare' && flowPayload.reason !== 'awaitUserAction') return;
         activePauseState = {
           reason: flowPayload.reason as 'cloudflare' | 'awaitUserAction',
           message: flowPayload.message,
+          trigger: flowPayload.trigger,
+          domain: flowPayload.domain,
         };
         const hubPayload = mapFlowPaused(ctx, payload as unknown as FlowPausedPayload);
         relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
@@ -415,12 +445,7 @@ export default defineBackground(() => {
 
     if (type === 'TASK_RECEIVED') {
       const task = message.payload as QueueTask;
-      if (activeRemoteTask || isStartingTask) {
-        pendingRemoteTasks.push(task);
-      } else {
-        isStartingTask = true;
-        startRemoteTask(task).catch((err) => console.error('[SW] startRemoteTask failed:', err));
-      }
+      scheduler.enqueueTask(task);
       return;
     }
 
@@ -428,19 +453,80 @@ export default defineBackground(() => {
 
     if (type === 'RESUME_TASK') {
       const { taskId } = (message.payload ?? {}) as { taskId?: string };
-      if (activeRemoteTask && (!taskId || taskId === activeRemoteTask.task.id)) {
-        browser.tabs.sendMessage(activeRemoteTask.tabId, { type: 'RESUME_AFTER_CLOUDFLARE' })
+      const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
+      if (target) {
+        browser.tabs.sendMessage(target.tabId, { type: 'RESUME_AFTER_CLOUDFLARE' })
           .catch((err) => console.error('[SW] RESUME_AFTER_CLOUDFLARE failed:', err));
         activePauseState = null;
       }
       return;
     }
 
+    // Sidepanel-driven resume. Intercept BEFORE the sidepanelToContent routing
+    // below so we can (1) clear activePauseState atomically and (2) drain any
+    // held continuation that's been waiting because the page navigated during
+    // the pause. The interceptor doesn't consume the message — it falls through
+    // to the routing block, which forwards to the live content script (if one
+    // is still listening). If the content script is dead (page navigated), the
+    // drained continuation re-delivers EXECUTE_FLOW.
+    if (type === 'RESUME_AFTER_PAUSE' || type === 'RESUME_AFTER_CLOUDFLARE') {
+      const wasPaused = activePauseState !== null;
+      const resumePayload = (message.payload ?? {}) as { markAsFalseAlarm?: boolean };
+
+      // Capture false-alarm signal BEFORE clearing activePauseState.
+      // Cloudflare cannot be marked as false alarm (UI doesn't expose the button).
+      if (
+        resumePayload.markAsFalseAlarm
+        && type === 'RESUME_AFTER_PAUSE'
+        && activePauseState?.reason === 'awaitUserAction'
+        && activePauseState?.trigger
+        && activePauseState?.domain
+      ) {
+        const { domain, trigger } = activePauseState;
+        // Async fire-and-forget; don't block the resume on storage write.
+        import('../sidepanel/utils/detectionMemory').then(({ addIgnoredTrigger }) => {
+          addIgnoredTrigger(domain, trigger).catch((err) => {
+            console.error('[SW] addIgnoredTrigger failed:', err);
+          });
+          console.warn('[SW] markAsFalseAlarm recorded | domain:', domain, '| trigger:', trigger);
+        });
+      }
+
+      activePauseState = null;
+      console.warn('[SW] sidepanel resume | type:', type, '| wasPaused:', wasPaused, '| markAsFalseAlarm:', resumePayload.markAsFalseAlarm);
+
+      browser.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
+        const tabId = activeTab?.id;
+        if (!tabId) return;
+        const continuation = pendingContinuations.get(tabId);
+        if (continuation) {
+          pendingContinuations.delete(tabId);
+          console.warn('[SW] resume — draining held continuation | tabId:', tabId);
+          setTimeout(() => {
+            browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+              .then(() => console.warn('[SW] held continuation delivered | tabId:', tabId))
+              .catch((err: Error) => {
+                console.warn('[SW] held continuation delivery failed | tabId:', tabId, '— re-registering | err:', err.message);
+                pendingContinuations.set(tabId, continuation);
+              });
+          }, 300);
+        }
+      }).catch(() => { /* ignore */ });
+
+      // Fall through to sidepanelToContent routing so the live content script
+      // (if any) also receives the resume signal and its waitForResumeSignal
+      // promise resolves.
+    }
+
     if (type === 'CANCEL_TASK') {
       const { taskId } = (message.payload ?? {}) as { taskId?: string };
-      if (activeRemoteTask && (!taskId || taskId === activeRemoteTask.task.id)) {
-        browser.tabs.sendMessage(activeRemoteTask.tabId, { type: 'ABORT_FLOW' })
+      const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
+      if (target) {
+        browser.tabs.sendMessage(target.tabId, { type: 'ABORT_FLOW' })
           .catch((err) => console.error('[SW] ABORT_FLOW failed:', err));
+      } else if (taskId) {
+        // May still be in pending — drop it without starting.
+        scheduler.cancelPending(taskId);
       }
       return;
     }
@@ -463,8 +549,8 @@ export default defineBackground(() => {
     if (type === 'GET_QUEUE_SNAPSHOT') {
       sendResponse({
         active: buildSnapshotActiveTask(),
-        pending: [...pendingRemoteTasks],
-        recent: [...recentRemoteTasks],
+        pending: [...scheduler.getPendingTasks()],
+        recent: [...scheduler.getRecent()],
       });
       return true;
     }
@@ -519,9 +605,28 @@ export default defineBackground(() => {
     ];
     if (contentToSidepanel.includes(type)) {
       if (type === 'FLOW_RESUMED') {
-        console.warn('[SW] FLOW_RESUMED relayed | activeTaskId:', activeRemoteTask?.task.id);
+        console.warn('[SW] FLOW_RESUMED relayed | activeTaskId:', scheduler.getFirstActive()?.task.id);
       }
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
+
+      // Mirror pause state into activePauseState for sidepanel-only runs.
+      // handleRemoteFlowEvent below also sets it but only when there is an active
+      // queue-mode record. Both paths converge on the same activePauseState.
+      if (type === 'FLOW_PAUSED') {
+        const fp = (message.payload ?? {}) as { reason?: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string };
+        if (fp.reason === 'cloudflare' || fp.reason === 'awaitUserAction') {
+          activePauseState = {
+            reason: fp.reason as 'cloudflare' | 'awaitUserAction',
+            message: fp.message,
+            trigger: fp.trigger,
+            domain: fp.domain,
+          };
+        }
+      }
+      if (type === 'FLOW_RESUMED') {
+        activePauseState = null;
+      }
+
       handleRemoteFlowEvent(type, (message.payload ?? {}) as Record<string, unknown>);
       return;
     }
@@ -530,7 +635,7 @@ export default defineBackground(() => {
 
     const sidepanelToContent = [
       'PING', 'START_PICKER', 'CANCEL_PICKER',
-      'EXECUTE_FLOW', 'ABORT_FLOW', 'RESUME_AFTER_CLOUDFLARE',
+      'EXECUTE_FLOW', 'ABORT_FLOW', 'RESUME_AFTER_CLOUDFLARE', 'RESUME_AFTER_PAUSE',
       'HIGHLIGHT_ELEMENT', 'UNHIGHLIGHT_ELEMENT', 'GET_PAGE_INFO',
       'SCAN_ELEMENTS', 'SCAN_ABORT',
     ];
@@ -575,14 +680,15 @@ export default defineBackground(() => {
   browser.tabs.onRemoved.addListener((tabId: number) => {
     frameRegistry.delete(tabId);
     pendingContinuations.delete(tabId);
-    if (activeRemoteTask && activeRemoteTask.tabId === tabId) {
+    const orphaned = scheduler.findByTabId(tabId);
+    if (orphaned) {
       relayHubInvocation('SEND_TASK_ERROR', {
-        taskId: activeRemoteTask.task.id,
-        configId: activeRemoteTask.task.configId,
+        taskId: orphaned.task.id,
+        configId: orphaned.task.configId,
         error: 'Task tab was closed',
         failedAt: new Date().toISOString(),
       });
-      drainNextRemoteTask();
+      drainNextRemoteTask(orphaned.task.id, 'failed');
     }
   });
 
@@ -594,6 +700,16 @@ export default defineBackground(() => {
       const continuation = pendingContinuations.get(tabId);
       if (continuation) {
         const cp = continuation as Record<string, unknown>;
+        // Pause-resilience: while activePauseState is set, the user is still
+        // working on the obstacle. The page may have navigated as part of that
+        // (e.g. login submit redirect). HOLD the continuation in the map and
+        // do NOT deliver — it will be drained by the sidepanel-resume handler
+        // when the user clicks Continue.
+        if (activePauseState) {
+          console.warn('[SW] tabs.onUpdated — holding continuation (pause active) | tabId:', tabId, '| reason:', activePauseState.reason);
+          return;
+        }
+
         // Capture tab URL at fire time so we can correlate with the content
         // script's view of where it is when its waitAfterAction returns.
         browser.tabs.get(tabId).then((t) => {
