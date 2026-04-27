@@ -3,6 +3,10 @@ import { detectCookieBanner } from './cookieBannerDetector';
 import { isVisible } from './visibility';
 import { DetectionTrigger } from '../types/messages';
 import type { DetectionRules, AutoDetectConfig } from '../types/config';
+import { initDetectionMemoryCache, getCachedIgnoredTriggers } from './detectionMemoryCache';
+
+// Initialise once per content-script lifetime.
+initDetectionMemoryCache();
 
 export interface DetectionResult {
   fired: boolean;
@@ -60,31 +64,52 @@ export interface WatchdogResult {
   trigger: DetectionTrigger;
 }
 
-// Detector priority (first match wins):
-//   cloudflare → loginWall → captcha → cookieBanner → extraSelectors
-// Each detector disabled via `cfg.{name} === false`; default-on otherwise.
-export function runDetectorWatchdog(cfg?: AutoDetectConfig): WatchdogResult {
-  const enabled = (k: keyof AutoDetectConfig): boolean => cfg?.[k] !== false;
+export type WatchdogMode = 'all' | 'confirmedOnly';
 
-  if (enabled('cloudflare') && detectCloudflareChallenge().detected) {
+// Detector priority (first match wins):
+//   cloudflare → loginWall → [captcha → cookieBanner] → extraSelectors
+// Each detector disabled via `cfg.{name} === false`; default-on otherwise.
+//
+// Two tiers:
+//   - "confirmed" (cloudflare, loginWall, extraSelectors): run on cold-start
+//     and after navigation. These genuinely block content.
+//   - "speculative" (captcha, cookieBanner): only run after a step has failed.
+//     They often false-positive (cookie banner that doesn't actually block,
+//     captcha widget in a non-blocking footer). Demoting them here cuts the
+//     false-positive rate dramatically without losing real blockers — if a
+//     banner DOES block a step, the post-failure watchdog catches it.
+export function runDetectorWatchdog(
+  cfg?: AutoDetectConfig,
+  mode: WatchdogMode = 'all',
+): WatchdogResult {
+  const enabled = (k: keyof AutoDetectConfig): boolean => cfg?.[k] !== false;
+  const ignored = new Set(getCachedIgnoredTriggers(window.location.hostname));
+  const notIgnored = (t: DetectionTrigger): boolean => !ignored.has(t);
+
+  if (enabled('cloudflare') && notIgnored(DetectionTrigger.CLOUDFLARE) && detectCloudflareChallenge().detected) {
     return { fired: true, trigger: DetectionTrigger.CLOUDFLARE };
   }
-  if (enabled('loginWall') && loginWallFires()) {
+  if (enabled('loginWall') && notIgnored(DetectionTrigger.LOGIN_WALL) && loginWallFires()) {
     return { fired: true, trigger: DetectionTrigger.LOGIN_WALL };
   }
-  // When cloudflare is explicitly disabled, don't let its detection leak through captchaFires().
-  const captchaFired = enabled('captcha') && (
-    enabled('cloudflare') ? captchaFires() : document.querySelector(CAPTCHA_SELECTOR) !== null
-  );
-  if (captchaFired) {
-    return { fired: true, trigger: DetectionTrigger.CAPTCHA };
+
+  if (mode === 'all') {
+    const captchaFired = enabled('captcha') && notIgnored(DetectionTrigger.CAPTCHA) && (
+      enabled('cloudflare') ? captchaFires() : document.querySelector(CAPTCHA_SELECTOR) !== null
+    );
+    if (captchaFired) {
+      return { fired: true, trigger: DetectionTrigger.CAPTCHA };
+    }
+    if (enabled('cookieBanner') && notIgnored(DetectionTrigger.COOKIE_BANNER) && detectCookieBanner()) {
+      return { fired: true, trigger: DetectionTrigger.COOKIE_BANNER };
+    }
   }
-  if (enabled('cookieBanner') && detectCookieBanner()) {
-    return { fired: true, trigger: DetectionTrigger.COOKIE_BANNER };
-  }
-  const extras = cfg?.extraSelectors ?? [];
-  if (extras.length > 0 && extraSelectorsFire(extras)) {
-    return { fired: true, trigger: DetectionTrigger.CUSTOM_SELECTOR };
+
+  if (notIgnored(DetectionTrigger.CUSTOM_SELECTOR)) {
+    const extras = cfg?.extraSelectors ?? [];
+    if (extras.length > 0 && extraSelectorsFire(extras)) {
+      return { fired: true, trigger: DetectionTrigger.CUSTOM_SELECTOR };
+    }
   }
   return { fired: false, trigger: DetectionTrigger.UNCONDITIONAL };
 }

@@ -33,27 +33,33 @@ export default function App() {
         const status = r?.status ?? 'idle';
         useSettingsStore.getState().setConnectionStatus(status);
 
+        // Always load the token into the store on startup so sync calls
+        // (pullSharedConfigs, pushIfDirty) have it before the user visits Settings.
+        const token = await getApiToken().catch(() => null);
+        if (token) useSettingsStore.setState({ jwtToken: token });
+
         const pauseRes = await browser.runtime.sendMessage({ type: 'GET_PAUSE_STATE' }).catch(() => null);
-        const ps = (pauseRes as { pauseState?: { reason: string; message?: string } } | null)?.pauseState;
+        const ps = (pauseRes as { pauseState?: { reason: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string } } | null)?.pauseState;
         if (ps?.reason === 'cloudflare') {
           useUiStore.getState().setCloudflarePaused(true);
         } else if (ps?.reason === 'awaitUserAction') {
-          useUiStore.getState().setAwaitActionPaused({ message: ps.message ?? 'Action needed in your browser.' });
+          useUiStore.getState().setAwaitActionPaused({
+            message: ps.message ?? 'Action needed in your browser.',
+            trigger: ps.trigger,
+            domain: ps.domain,
+          });
         }
 
-        if (status === 'idle' && mode === 'queue' && serverUrl) {
-          const token = await getApiToken().catch(() => null);
-          if (token) {
-            await browser.runtime.sendMessage({
-              type: 'INIT_SIGNALR',
-              payload: {
-                serverUrl,
-                token,
-                clientId: workerName || 'My Browser',
-                version: chrome.runtime.getManifest().version,
-              },
-            });
-          }
+        if (status === 'idle' && mode === 'queue' && serverUrl && token) {
+          await browser.runtime.sendMessage({
+            type: 'INIT_SIGNALR',
+            payload: {
+              serverUrl,
+              token,
+              clientId: workerName || 'My Browser',
+              version: chrome.runtime.getManifest().version,
+            },
+          });
         }
       })
       .catch(() => {});

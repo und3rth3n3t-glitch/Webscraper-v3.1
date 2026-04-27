@@ -16,7 +16,7 @@ export type ContentToSidepanelMessage =
   | { type: 'CLOUDFLARE_DETECTED';    payload: { challengeType: CloudflareChallengeType; taskId?: string } }
   | { type: 'FLOW_PAUSED';            payload:
         | { reason: 'cloudflare'; challengeType?: CloudflareChallengeType; taskId?: string }
-        | { reason: 'awaitUserAction'; trigger: DetectionTrigger; message: string; taskId?: string } }
+        | { reason: 'awaitUserAction'; trigger: DetectionTrigger; message: string; domain: string; taskId?: string } }
   | { type: 'FLOW_RESUMED' }
   | { type: 'NETWORK_CALL_CAPTURED';  payload: ApiCall }
   | { type: 'PAGE_INFO';              payload: { url: string; title: string } }
@@ -30,7 +30,7 @@ export type SidepanelToContentMessage =
   | { type: 'EXECUTE_FLOW';           payload: { config: import('./config').ScraperConfig; searchTerms: string[]; taskId?: string } }
   | { type: 'ABORT_FLOW' }
   | { type: 'RESUME_AFTER_CLOUDFLARE' }
-  | { type: 'RESUME_AFTER_PAUSE' }
+  | { type: 'RESUME_AFTER_PAUSE';     payload?: { markAsFalseAlarm?: boolean } }
   | { type: 'HIGHLIGHT_ELEMENT';      payload: { descriptor: SelectorDescriptor } }
   | { type: 'UNHIGHLIGHT_ELEMENT' }
   | { type: 'GET_PAGE_INFO' }

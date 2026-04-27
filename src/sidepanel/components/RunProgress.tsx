@@ -27,7 +27,7 @@ export default function RunProgress() {
     setResults,
     setError,
   } = useRunStore();
-  const { setCloudflarePaused } = useUiStore();
+  const { setCloudflarePaused, setAwaitActionPaused } = useUiStore();
   const [confirmStop, setConfirmStop] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -60,12 +60,38 @@ export default function RunProgress() {
     const p = payload as Record<string, unknown>;
     if (p.reason === 'cloudflare') {
       setCloudflarePaused(true);
+    } else {
+      setAwaitActionPaused({
+        message: (p.message as string) || 'Action needed in your browser.',
+        trigger: p.trigger as import('../../types/messages').DetectionTrigger | undefined,
+        domain: p.domain as string | undefined,
+      });
     }
   });
 
   useContentMessage('FLOW_RESUMED', () => {
     setCloudflarePaused(false);
+    setAwaitActionPaused(null);
   });
+
+  // Pick up any pause state that was set before this component mounted
+  // (race: cold-start watchdog fires FLOW_PAUSED before RunProgress registers its listener)
+  useEffect(() => {
+    browser.runtime.sendMessage({ type: 'GET_PAUSE_STATE' })
+      .then((res: unknown) => {
+        const ps = (res as { pauseState?: { reason: string; message?: string; trigger?: import('../../types/messages').DetectionTrigger; domain?: string } } | null)?.pauseState;
+        if (ps?.reason === 'cloudflare') {
+          setCloudflarePaused(true);
+        } else if (ps?.reason === 'awaitUserAction') {
+          setAwaitActionPaused({
+            message: ps.message ?? 'Action needed in your browser.',
+            trigger: ps.trigger,
+            domain: ps.domain,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (logRef.current) {

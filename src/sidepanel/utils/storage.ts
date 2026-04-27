@@ -14,6 +14,7 @@ const STEP_OPTION_DEFAULTS: Record<string, Record<string, unknown>> = {
   selectEach: { selectEachOptions: { controlType: null, controlSelector: null, options: [], contentAreaSelector: null, subSteps: [], waitAfterSelectMs: 1500 } },
   captureApiCalls: { urlPattern: '', durationMs: 5000, includeResponseBody: true },
   awaitUserAction: { message: '' },
+  navigateTo: { url: '' },
 };
 
 export function migrateConfig(config: Record<string, unknown>): ScraperConfig | null {

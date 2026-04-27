@@ -35,6 +35,9 @@ export default function LoopBlockInspector({ block, dispatch }: Props) {
           rows={8}
           value={block.values.join('\n')}
           onChange={(e) => {
+            dispatch({ type: 'UPDATE_LOOP', id: block.id, patch: { values: e.target.value.split('\n') } });
+          }}
+          onBlur={(e) => {
             const vals = e.target.value.split('\n').map((v) => v.trimEnd());
             dispatch({ type: 'UPDATE_LOOP', id: block.id, patch: { values: vals } });
           }}

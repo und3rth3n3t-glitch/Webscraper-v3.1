@@ -16,11 +16,11 @@ export default function CloudflarePauseAlert() {
   return (
     <div className="detection-banner detection-banner--warning">
       <div className="detection-banner-body">
-        <strong>Security check detected</strong>
-        <p>The site is showing a Cloudflare challenge. Complete it in the page, then resume.</p>
+        <strong>Paused — security check</strong>
+        <p>The site is showing a Cloudflare challenge. Complete it in the page (the scraper will wait) and click Continue when you're through.</p>
       </div>
       <button className="btn btn-secondary btn-sm" onClick={handleResume}>
-        Resume
+        Continue
       </button>
     </div>
   );

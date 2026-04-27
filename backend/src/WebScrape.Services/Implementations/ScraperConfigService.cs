@@ -116,10 +116,11 @@ public class ScraperConfigService : IScraperConfigService
             return new(UpdateScraperConfigOutcome.PreconditionRequired, null, null);
 
         // If-Match check: compare client's etag to server's current UpdatedAt.
+        // Parse both sides to UTC ticks to avoid string format differences (e.g. +00:00 vs +01:00 in BST).
         if (ifMatch is not null)
         {
-            var etag = entity.UpdatedAt.ToUniversalTime().ToString("o");
-            if (etag != ifMatch)
+            if (!DateTimeOffset.TryParse(ifMatch, out var clientDt)
+                || entity.UpdatedAt.ToUnixTimeMilliseconds() != clientDt.ToUnixTimeMilliseconds())
                 return new(UpdateScraperConfigOutcome.PreconditionFailed, null, await MapWithWorkerName(entity, ct));
         }
 

@@ -107,7 +107,11 @@ export const useRunStore = create<RunState>((set, get) => ({
     set({ runContext: context });
 
     const needsSearchTerms = steps.some(
-      (s) => !s.isSetup && (s.type === 'setInput' || s.type === 'bestMatch'),
+      (s) => !s.isSetup && (
+        s.type === 'setInput' ||
+        s.type === 'bestMatch' ||
+        (s.type === 'navigateTo' && (s.options as { url?: string }).url?.includes('{searchTerm}'))
+      ),
     );
     if (needsSearchTerms) {
       await get().navigateRun('SEARCH_VAR_INPUT');

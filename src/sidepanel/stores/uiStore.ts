@@ -24,7 +24,7 @@ interface UiState {
   pendingPickerStepId: string | null;
   pendingPickerField: string | null;
   cloudfarePaused: boolean;
-  awaitActionPaused: { message: string } | null;
+  awaitActionPaused: { message: string; trigger?: import('../../types/messages').DetectionTrigger; domain?: string } | null;
 
   setActiveTab: (tab: ActiveTab) => void;
   requestTabSwitch: (tab: ActiveTab) => void;
@@ -38,7 +38,7 @@ interface UiState {
   setRunning: (v: boolean) => void;
   setSavedTabView: (view: string) => void;
   setCloudflarePaused: (v: boolean) => void;
-  setAwaitActionPaused: (v: { message: string } | null) => void;
+  setAwaitActionPaused: (v: { message: string; trigger?: import('../../types/messages').DetectionTrigger; domain?: string } | null) => void;
   showToast: (message: string, type?: Toast['type'], duration?: number) => number;
   dismissToast: (id: number) => void;
 }

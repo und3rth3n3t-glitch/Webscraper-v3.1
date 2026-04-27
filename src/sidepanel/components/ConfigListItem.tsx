@@ -85,13 +85,13 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
             </button>
             <button
               className={`btn btn-icon ${config.shared ? 'btn-icon-edit' : 'btn-icon-subtle'}`}
-              onClick={inConflict ? () => setConflictOpen(true) : handleToggleShare}
-              disabled={isPushing}
+              onClick={handleToggleShare}
+              disabled={isPushing || inConflict}
               title={
                 isPushing
                   ? 'Syncing…'
                   : inConflict
-                  ? 'Server has newer changes — click to resolve'
+                  ? 'Resolve the conflict first'
                   : config.shared
                   ? 'Stop syncing (your backend keeps a copy)'
                   : 'Sync this config with your backend'
@@ -122,9 +122,23 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
           </div>
         )}
 
-        {config.shared && (
+        {config.shared && !inConflict && (
           <div className="config-card-body" style={{ paddingTop: 0 }}>
             <ConfigSyncStatus config={config} />
+          </div>
+        )}
+
+        {config.shared && inConflict && (
+          <div className="config-card-body" style={{ paddingTop: 0 }}>
+            <div className="detection-banner detection-banner--error">
+              <div className="detection-banner-body">
+                <strong>Backend has newer changes</strong>
+                <p>You edited this here, but it was also edited on the backend. Pick which version to keep.</p>
+              </div>
+              <button className="btn btn-secondary btn-sm" onClick={() => setConflictOpen(true)}>
+                Resolve
+              </button>
+            </div>
           </div>
         )}
 

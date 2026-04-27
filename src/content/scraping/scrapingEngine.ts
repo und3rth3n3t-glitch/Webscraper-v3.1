@@ -142,6 +142,21 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
 
     if (!isResume) {
       try {
+        // Cold-start watchdog — runs once before any setup step so cookie
+        // banners / login walls / cloudflare gates on the initial page are
+        // caught even when the config has no leading navigateTo step.
+        // Skipped on resume because the post-navigation watchdog at line ~227
+        // already cleared the gate in the prior run-leg.
+        swLog('[cold-start watchdog] enter | url:', window.location.href, '| autoDetect:', config.autoDetect);
+        await runWatchdogPause(config.autoDetect, taskId, {
+          config,
+          searchTerms,
+          previousIterations: result.iterations,
+          startTermIndex: 0,
+          startLoopStepIndex: 0,
+        }, 'confirmedOnly');
+        swLog('[cold-start watchdog] exit');
+
         for (const step of setupSteps) {
           checkAbort();
           await executeStep(step, null, 0, (msg) => sendProgress({ phase: 'setup', stepLabel: msg, status: 'running', taskId }), afk, taskId);
@@ -175,6 +190,23 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       try {
         const siStart = i === startTermIndex ? startLoopStepIndex : 0;
 
+        // Resumed-leg watchdog: when EXECUTE_FLOW was re-delivered via a held
+        // continuation (after pause-driven navigation, or after a navigateTo
+        // step that blocks until reload), the prior step's post-nav watchdog
+        // never ran. Re-check before stepping into the resumed leg so a
+        // still-present obstacle re-pauses rather than letting the flow run
+        // through it.
+        if (i === startTermIndex && (siStart > 0 || startTermIndex > 0)) {
+          swLog('[resumed-leg watchdog] enter | taskId:', taskId, '| termIndex:', i, '| siStart:', siStart, '| url:', window.location.href);
+          await runWatchdogPause(config.autoDetect, taskId, {
+            config,
+            searchTerms,
+            previousIterations: result.iterations,
+            startTermIndex: i,
+            startLoopStepIndex: siStart,
+          }, 'confirmedOnly');
+        }
+
         for (let si = siStart; si < loopSteps.length; si++) {
           checkAbort();
           // Occasional "thinking" pause: 2 % of steps get a 1–3 s pre-delay to
@@ -206,25 +238,67 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
 
           let stepData: Record<string, unknown> | null = null;
           const urlBeforeStep = window.location.href;
+          let retried = false;
+
           try {
-            stepData = await executeStep(
-              step,
-              term,
-              i,
-              (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
-              afk,
-              taskId,
-            );
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              try {
+                stepData = await executeStep(
+                  step,
+                  term,
+                  i,
+                  (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
+                  afk,
+                  taskId,
+                );
+                break; // step succeeded — exit retry loop
+              } catch (stepErr) {
+                const se = stepErr as Error;
+                // ABORTED and SkipIterationError are meaningful signals, not failures.
+                if (se.message === 'ABORTED' || se.name === 'SkipIterationError') throw stepErr;
+                // Already retried once — propagate.
+                if (retried) throw stepErr;
+
+                // Post-failure watchdog: full detector set including speculative tier.
+                // If something blocking is detected, pause for the user, then retry once.
+                swLog('[executeFlow] step FAILED — running post-failure watchdog | taskId:', taskId, '| stepIndex:', si, '| err:', se.message);
+                const detection = runDetectorWatchdog(config.autoDetect, 'all');
+                if (!detection.fired) {
+                  swLog('[executeFlow] post-failure watchdog clean — propagating original error | taskId:', taskId);
+                  throw stepErr;
+                }
+                swLog('[executeFlow] post-failure watchdog FIRED — pausing for user | trigger:', detection.trigger);
+                // runWatchdogPause re-evaluates the detector but we know it'll
+                // fire again (or fire on something else). Use 'all' mode to keep
+                // catching speculative obstacles on the retry pause.
+                await runWatchdogPause(config.autoDetect, taskId, {
+                  config,
+                  searchTerms,
+                  previousIterations: result.iterations,
+                  startTermIndex: i,
+                  startLoopStepIndex: si,
+                }, 'all');
+                retried = true;
+                // Loop continues — retry the step on the (presumably) cleared page.
+              }
+            }
 
             // Post-navigation settle: real users glance at the new page before acting.
             // Only fires when the step was a navigating type AND the URL actually changed.
             if (isNavigating && window.location.href !== urlBeforeStep) {
               await randomDelay(300, 800);
             }
-            swLog('[executeFlow] step OK  | taskId:', taskId, '| stepIndex:', si, '| type:', step.type, '| stepData keys:', stepData ? Object.keys(stepData) : null, '| url:', window.location.href);
+            swLog('[executeFlow] step OK  | taskId:', taskId, '| stepIndex:', si, '| type:', step.type, '| stepData keys:', stepData ? Object.keys(stepData) : null, '| url:', window.location.href, '| retried:', retried);
 
             if (isNavigating) {
-              await runWatchdogPause(config.autoDetect, taskId);
+              await runWatchdogPause(config.autoDetect, taskId, {
+                config,
+                searchTerms,
+                previousIterations: result.iterations,
+                startTermIndex: i,
+                startLoopStepIndex: si + 1,
+              }, 'confirmedOnly');
             }
           } finally {
             // Always cancel the continuation for navigating steps â€” including when
@@ -303,6 +377,11 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
   } finally {
     swLog('[executeFlow] finally â€” clearing flowRunning | taskId:', taskId);
     flowRunning = false;
+    // Cancel any lingering pause-continuation. End-of-flow cleanup so a
+    // stale continuation can't fire on a future tab navigation.
+    try {
+      browser.runtime.sendMessage({ type: MessageType.CANCEL_CONTINUATION });
+    } catch { /* extension context may be invalidated */ }
   }
 }
 
@@ -334,18 +413,54 @@ function messageForTrigger(trigger: DetectionTrigger): string {
   }
 }
 
+interface PauseResumeContext {
+  config: ScraperConfig;
+  searchTerms: string[];
+  previousIterations: WireIteration[];
+  startTermIndex: number;
+  startLoopStepIndex: number;
+}
+
 // Post-navigation watchdog. Wire-protocol decision:
 //   - cloudflare uses reason='cloudflare' (existing dispatcher routes to CloudflarePauseAlert + auto-clear race)
 //   - everything else uses reason='awaitUserAction' with a trigger field (existing dispatcher routes to AwaitActionPauseAlert)
 // PR4 will rationalise the taxonomy once the dispatcher is rewritten.
+//
+// Pause-resilience: before sending FLOW_PAUSED we register a continuation
+// pointing at the current leg. If the user resolves the obstacle via an
+// action that navigates the page (Accept All cookies, login submit), the
+// content script dies but the SW holds the continuation until the user
+// clicks Continue, then re-delivers EXECUTE_FLOW so the flow resumes
+// from the same leg on the new page.
 async function runWatchdogPause(
   cfg: AutoDetectConfig | undefined,
   taskId: string | undefined,
+  resumeCtx: PauseResumeContext,
+  mode: 'all' | 'confirmedOnly' = 'all',
 ): Promise<void> {
-  const result = runDetectorWatchdog(cfg);
+  const result = runDetectorWatchdog(cfg, mode);
+  swLog('[watchdog] result | fired:', result.fired, '| trigger:', result.trigger, '| cfg:', cfg);
   if (!result.fired) return;
 
   swLog('[watchdog] fired | taskId:', taskId, '| trigger:', result.trigger, '| url:', window.location.href);
+
+  // Register a pause-continuation pointing at the current leg. If the user
+  // resolves the obstacle via page-navigating action, the held continuation
+  // re-delivers EXECUTE_FLOW after the user clicks Continue.
+  try {
+    browser.runtime.sendMessage({
+      type: MessageType.REGISTER_CONTINUATION,
+      payload: {
+        config: resumeCtx.config,
+        searchTerms: resumeCtx.searchTerms,
+        taskId,
+        startTermIndex: resumeCtx.startTermIndex,
+        startLoopStepIndex: resumeCtx.startLoopStepIndex,
+        previousIterations: resumeCtx.previousIterations,
+      },
+    });
+    swLog('[watchdog] pause-continuation registered | startTermIndex:', resumeCtx.startTermIndex, '| startLoopStepIndex:', resumeCtx.startLoopStepIndex);
+  } catch { /* extension context may be invalidated */ }
 
   if (result.trigger === DetectionTrigger.CLOUDFLARE) {
     browser.runtime.sendMessage({
@@ -360,6 +475,7 @@ async function runWatchdogPause(
         reason: PauseReason.AWAIT_USER_ACTION,
         trigger: result.trigger,
         message: messageForTrigger(result.trigger),
+        domain: window.location.hostname,
         taskId,
       },
     });
@@ -774,6 +890,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
       reason: PauseReason.AWAIT_USER_ACTION,
       trigger: evalResult.trigger,
       message: opts.message,
+      domain: window.location.hostname,
       taskId,
     },
   });

@@ -7,6 +7,7 @@ import type {
   Step,
   StepType,
   DataMapping,
+  AutoDetectConfig,
   SetInputOptions,
   ClickOptions,
   BestMatchOptions,
@@ -15,6 +16,7 @@ import type {
   SelectEachOptions,
   CaptureApiCallsOptions,
   AwaitUserActionOptions,
+  NavigateToOptions,
 } from '../../types/config';
 
 type StepOptions =
@@ -25,7 +27,8 @@ type StepOptions =
   | ScrapeOptions
   | SelectEachOptions
   | CaptureApiCallsOptions
-  | AwaitUserActionOptions;
+  | AwaitUserActionOptions
+  | NavigateToOptions;
 
 const DEFAULT_STEP_LABELS: Record<StepType, string> = {
   setInput:        'Type search term',
@@ -36,6 +39,7 @@ const DEFAULT_STEP_LABELS: Record<StepType, string> = {
   selectEach:      'Select each option',
   captureApiCalls: 'Capture API calls',
   awaitUserAction: 'Wait for user',
+  navigateTo:      'Go to URL',
 };
 
 export function getDefaultOptions(type: StepType): StepOptions {
@@ -56,6 +60,8 @@ export function getDefaultOptions(type: StepType): StepOptions {
       return { urlPattern: '', durationMs: 5000, includeResponseBody: true } satisfies CaptureApiCallsOptions;
     case 'awaitUserAction':
       return { message: '' } satisfies AwaitUserActionOptions;
+    case 'navigateTo':
+      return { url: '' } satisfies NavigateToOptions;
   }
 }
 
@@ -85,6 +91,7 @@ interface ConfigState {
   cameFromSaved: boolean;
   view: string;
   viewStack: string[];
+  autoDetect: AutoDetectConfig | undefined;
 
   setPageInfo: (url: string, domain?: string) => void;
   pushView: (view: string) => void;
@@ -104,6 +111,7 @@ interface ConfigState {
   setDomainLocked: (v: boolean) => void;
   setEditingStepId: (id: string | null) => void;
   setDataMapping: (mapping: DataMapping) => void;
+  setAutoDetect: (cfg: AutoDetectConfig | undefined) => void;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -119,6 +127,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   cameFromSaved: false,
   view: 'NO_CONFIG',
   viewStack: [],
+  autoDetect: undefined,
 
   setPageInfo: (url, domain) => {
     set({
@@ -195,7 +204,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   saveCurrentConfig: async () => {
-    const { steps, currentConfig, pageDomain, pageUrl, configName, domainLocked } = get();
+    const { steps, currentConfig, pageDomain, pageUrl, configName, domainLocked, autoDetect } = get();
     const config: ScraperConfig = {
       id: currentConfig?.id || generateId(),
       name: configName || 'Untitled Config',
@@ -204,7 +213,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       url: pageUrl,
       steps,
       dataMapping: currentConfig?.dataMapping,
-      schemaVersion: CURRENT_SCHEMA_VERSION as 4,
+      autoDetect,
+      schemaVersion: (autoDetect ? 5 : CURRENT_SCHEMA_VERSION) as 4 | 5,
       createdAt: currentConfig?.createdAt || Date.now(),
       updatedAt: Date.now(),
       shared: currentConfig?.shared ?? false,
@@ -239,6 +249,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       steps: safe.steps || [],
       configName: safe.name,
       domainLocked: safe.domainLocked ?? !!(safe.domain),
+      autoDetect: safe.autoDetect,
       isDirty: false,
       view: 'STEP_LIST',
       viewStack: [],
@@ -253,6 +264,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       steps: [],
       configName: '',
       domainLocked: false,
+      autoDetect: undefined,
       isDirty: false,
       view: 'NO_CONFIG',
       viewStack: [],
@@ -268,4 +280,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     currentConfig: s.currentConfig ? { ...s.currentConfig, dataMapping: mapping } : null,
     isDirty: true,
   })),
+
+  setAutoDetect: (cfg) => set({ autoDetect: cfg, isDirty: true }),
 }));

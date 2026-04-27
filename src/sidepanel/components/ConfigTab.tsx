@@ -8,6 +8,7 @@ import ScrapeElementsForm from './ScrapeElementsForm';
 import SelectEachForm from './SelectEachForm';
 import BestMatchForm from './BestMatchForm';
 import GoBackForm from './GoBackForm';
+import NavigateToForm from './NavigateToForm';
 import LoopConfig from './LoopConfig';
 import SaveConfigForm from './SaveConfigForm';
 import ElementPickerStatus from './ElementPickerStatus';
@@ -20,6 +21,8 @@ import ConfigToolbar from './ConfigToolbar';
 import AwaitUserActionForm from './AwaitUserActionForm';
 import NetworkRecorderView from './NetworkRecorderView';
 import DataMappingView from './DataMappingView';
+import DetectionSettings from './DetectionSettings';
+import LearnedDetectionView from './LearnedDetectionView';
 import { useConfigStore } from '../stores/configStore';
 import { useUiStore } from '../stores/uiStore';
 import { dispatchPickerResult } from '../utils/pickerDispatch';
@@ -55,6 +58,8 @@ export default function ConfigTab() {
         return <BestMatchForm />;
       case 'GO_BACK_FORM':
         return <GoBackForm />;
+      case 'NAVIGATE_TO_FORM':
+        return <NavigateToForm />;
       case 'SCRAPE_FORM':
         return <ScrapeForm />;
       case 'SCRAPE_WHOLE_PAGE_FORM':
@@ -69,6 +74,10 @@ export default function ConfigTab() {
         return <AwaitUserActionForm />;
       case 'LOOP_CONFIG':
         return <LoopConfig />;
+      case 'DETECTION_SETTINGS':
+        return <DetectionSettings />;
+      case 'LEARNED_DETECTION':
+        return <LearnedDetectionView />;
       case 'SAVE_CONFIG':
         return <SaveConfigForm />;
       case 'EDIT_STEP': {
@@ -79,6 +88,7 @@ export default function ConfigTab() {
           case 'click':           return <ClickElementForm editingStepId={editingStepId!} />;
           case 'bestMatch':       return <BestMatchForm editingStepId={editingStepId!} />;
           case 'goBack':          return <GoBackForm editingStepId={editingStepId!} />;
+          case 'navigateTo':      return <NavigateToForm editingStepId={editingStepId!} />;
           case 'scrape':
             if ((editStep.options as { mode?: string }).mode === 'wholePage')
               return <ScrapeWholePageForm editingStepId={editingStepId!} />;

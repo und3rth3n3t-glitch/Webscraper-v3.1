@@ -171,6 +171,13 @@ export default function StepList() {
           Configure Loop
         </button>
 
+        <button
+          className="btn btn-secondary btn-full mt-4"
+          onClick={() => pushView('DETECTION_SETTINGS')}
+        >
+          Detection Settings
+        </button>
+
         <div className="step-list-actions">
           <button className="btn btn-secondary" onClick={handleSave}>
             Save

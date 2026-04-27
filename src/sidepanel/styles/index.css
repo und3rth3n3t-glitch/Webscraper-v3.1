@@ -454,6 +454,46 @@ body {
   align-items: center;
 }
 .detection-banner-body { flex: 1; min-width: 0; }
+.detection-banner-hint {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+.detection-banner-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: stretch;
+}
+
+.learned-detection-domain {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.learned-detection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.learned-detection-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.learned-detection-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0;
+  font-size: 0.9em;
+}
+
 .detection-banner.success { background: var(--success-light); border-left-color: var(--success); }
 .detection-banner.warning { background: var(--warning-light); border-left-color: var(--warning); }
 .detection-banner.error { background: var(--danger-light); border-left-color: var(--danger); }
@@ -477,6 +517,12 @@ body {
 .detection-banner--warning {
   background: var(--warning-light);
   border-color: var(--warning);
+  color: var(--text-dark);
+}
+
+.detection-banner--error {
+  background: var(--danger-light);
+  border-color: var(--danger);
   color: var(--text-dark);
 }
 

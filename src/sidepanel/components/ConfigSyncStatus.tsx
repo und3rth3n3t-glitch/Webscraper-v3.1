@@ -11,17 +11,17 @@ export default function ConfigSyncStatus({ config }: Props) {
   if (!config.shared) return null;
 
   const inConflict = !!conflicts[config.id];
-  const isPending = config.dirty && !inConflict;
+  // Conflict UX is owned by ConfigListItem's banner — this component renders nothing in that state.
+  if (inConflict) return null;
+
+  const isPending = config.dirty;
   const isPushing = pushingIds.has(config.id);
   const isSyncing = isPushing || (syncing && isPending);
 
   let dot: string;
   let label: string;
 
-  if (inConflict) {
-    dot = 'error';
-    label = 'Server has newer changes — click to resolve';
-  } else if (isSyncing) {
+  if (isSyncing) {
     dot = 'running';
     label = 'Syncing…';
   } else if (isPending) {
@@ -39,7 +39,7 @@ export default function ConfigSyncStatus({ config }: Props) {
       title={label}
     >
       <span className={`status-dot ${dot}`} />
-      {inConflict ? 'Conflict' : isPending ? 'Pending' : 'Synced'}
+      {isPending ? 'Pending' : 'Synced'}
     </span>
   );
 }
