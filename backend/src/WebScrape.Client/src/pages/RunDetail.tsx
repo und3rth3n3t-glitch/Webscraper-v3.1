@@ -7,7 +7,7 @@ import { useCancelRun } from '../api/mutations';
 import ResultViewer from '../components/result/ResultViewer';
 import RawJsonCard from '../components/result/RawJsonCard';
 import { runExportUrl } from '../utils/exportLinks';
-import type { DataMapping, IterationResult } from '../types/extraction';
+import type { WireIteration } from '../types/wire';
 
 const BANNER_CLASS: Partial<Record<RunStatus, string>> = {
   [RunItemStatus.Completed]: 'run-banner-success',
@@ -42,9 +42,8 @@ export default function RunDetail() {
 
   const bannerClass = BANNER_CLASS[run.status];
   const pct = run.progressPercent ?? 0;
-  const result = run.result as { iterations?: IterationResult[]; dataMapping?: DataMapping } | null;
+  const result = run.result as { iterations?: WireIteration[] } | null;
   const iterations = result?.iterations ?? [];
-  const dataMapping = result?.dataMapping;
   const isComplete = run.status === RunItemStatus.Completed;
   const csvDisabled = !isComplete || isWholepageResult(run.result);
 
@@ -112,7 +111,7 @@ export default function RunDetail() {
       </div>
 
       {iterations.length > 0 ? (
-        <ResultViewer iterations={iterations} dataMapping={dataMapping} />
+        <ResultViewer iterations={iterations} />
       ) : run.result != null ? (
         <RawJsonCard fieldName={null} value={run.result} />
       ) : null}

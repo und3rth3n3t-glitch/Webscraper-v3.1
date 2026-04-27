@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { api } from './client';
-import type { AccountDto, ApiKeyDto, PagedResultDto, RunBatchDetailDto, RunBatchListItemDto, RunBatchListQuery, RunItemDto, RunListItemDto, RunListQuery, ScraperConfigDto, TaskDto, WorkerDto } from './types';
+import type { AccountDto, ApiKeyDto, PagedResultDto, RunBatchDetailDto, RunBatchListItemDto, RunBatchListQuery, RunItemDto, RunListItemDto, RunListQuery, ScraperConfigDto, ScraperConfigSubscriberDto, TaskDto, WorkerDto } from './types';
 import { RUN_POLL_MS, WORKER_POLL_MS } from './constants';
 import { allTerminal, isTerminalStatus } from '../utils/runStatus';
 
@@ -81,6 +81,14 @@ export function useScraperConfig(id: string | undefined) {
     queryKey: ['scraper-configs', id],
     enabled: !!id,
     queryFn: async () => (await api.get<ScraperConfigDto>(`/api/scraper-configs/${id}`)).data,
+  });
+}
+
+export function useScraperConfigSubscribers(id: string | undefined) {
+  return useQuery({
+    queryKey: ['scraper-config-subscribers', id],
+    enabled: !!id,
+    queryFn: async () => (await api.get<ScraperConfigSubscriberDto[]>(`/api/scraper-configs/${id}/subscribers`)).data,
   });
 }
 

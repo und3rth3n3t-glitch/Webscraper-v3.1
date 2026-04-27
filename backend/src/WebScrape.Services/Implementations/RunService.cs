@@ -13,6 +13,12 @@ namespace WebScrape.Services.Implementations;
 
 public class RunService : IRunService
 {
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+    };
+
     private readonly WebScrapeDbContext _db;
     private readonly IMapper _mapper;
     private readonly IWorkerNotifier _notifier;
@@ -66,10 +72,11 @@ public class RunService : IRunService
             return;
         }
 
+        var resultJson = JsonSerializer.Serialize(payload.Result, JsonOpts);
+
         var run = await _db.RunItems.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
 
-        var resultJson = JsonSerializer.Serialize(payload.Result);
         run.ResultJsonb = JsonDocument.Parse(resultJson);
         run.Status = RunItemStatus.Completed;
         run.CompletedAt = payload.CompletedAt == default ? DateTimeOffset.UtcNow : payload.CompletedAt;

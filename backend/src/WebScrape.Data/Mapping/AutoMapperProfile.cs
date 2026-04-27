@@ -19,7 +19,8 @@ public class AutoMapperProfile : Profile
         CreateMap<ApiKey, ApiKeyDto>();
 
         CreateMap<ScraperConfigEntity, ScraperConfigDto>()
-            .ForMember(d => d.ConfigJson, o => o.MapFrom(s => s.ConfigJson.RootElement));
+            .ForMember(d => d.ConfigJson, o => o.MapFrom(s => s.ConfigJson.RootElement))
+            .ForMember(d => d.OriginWorkerName, o => o.Ignore());
 
         CreateMap<CreateScraperConfigDto, ScraperConfigEntity>()
             .ForMember(d => d.ConfigJson, o => o.MapFrom(s => JsonDocument.Parse(s.ConfigJson.GetRawText(), default)));

@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseSetInputSteps, autoBindSteps, buildSaveDto } from './taskEditor';
-import { BlockType } from '../api/types';
-import type { EditorState } from './taskEditor';
+import { parseSetInputSteps, autoBindSteps } from './taskEditor';
 
 describe('parseSetInputSteps', () => {
   it('returns setInput steps from valid config', () => {
@@ -66,42 +64,14 @@ describe('autoBindSteps', () => {
     expect(result.s2).toEqual({ kind: 'unbound' });
     expect(result.s3).toEqual({ kind: 'unbound' });
   });
-});
 
-describe('buildSaveDto', () => {
-  const baseState: EditorState = {
-    name: 'My Task',
-    loopBlockId: 'loop-uuid',
-    scrapeBlockId: 'scrape-uuid',
-    loopName: 'loop1',
-    loopValues: ['alpha', '  ', 'beta', ''],
-    scraperConfigId: 'config-uuid',
-    stepBindings: { s1: { kind: 'loopRef', loopBlockId: 'loop-uuid' } },
-  };
-
-  it('strips blank/empty loop values', () => {
-    const dto = buildSaveDto(baseState);
-    const loopBlock = dto.blocks.find((b) => b.blockType === BlockType.Loop)!;
-    expect(loopBlock.loop?.values).toEqual(['alpha', 'beta']);
-  });
-
-  it('builds correct two-block tree with correct blockTypes', () => {
-    const dto = buildSaveDto(baseState);
-    expect(dto.blocks).toHaveLength(2);
-    expect(dto.blocks[0].blockType).toBe(BlockType.Loop);
-    expect(dto.blocks[1].blockType).toBe(BlockType.Scrape);
-  });
-
-  it('sets scrape block parent to loop block id', () => {
-    const dto = buildSaveDto(baseState);
-    const scrapeBlock = dto.blocks.find((b) => b.blockType === BlockType.Scrape)!;
-    expect(scrapeBlock.parentBlockId).toBe('loop-uuid');
-  });
-
-  it('passes scraperConfigId and stepBindings through', () => {
-    const dto = buildSaveDto(baseState);
-    const scrapeBlock = dto.blocks.find((b) => b.blockType === BlockType.Scrape)!;
-    expect(scrapeBlock.scrape?.scraperConfigId).toBe('config-uuid');
-    expect(scrapeBlock.scrape?.stepBindings).toEqual(baseState.stepBindings);
+  it('sets all steps to unbound when innermostLoopBlockId is null', () => {
+    const steps = [
+      { id: 's1', type: 'setInput' as const },
+      { id: 's2', type: 'setInput' as const },
+    ];
+    const result = autoBindSteps(steps, null);
+    expect(result.s1).toEqual({ kind: 'unbound' });
+    expect(result.s2).toEqual({ kind: 'unbound' });
   });
 });

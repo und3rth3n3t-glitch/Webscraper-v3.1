@@ -50,8 +50,27 @@ public class ScraperHub : Hub
         return _workers.RegisterAsync(userId, apiKeyId, clientId, extensionVersion, Context.ConnectionId);
     }
 
-    public Task TaskProgress(TaskProgressDto payload) => _runs.RecordProgressAsync(payload);
-    public Task TaskComplete(TaskCompleteDto payload) => _runs.CompleteAsync(payload);
-    public Task TaskError(TaskErrorDto payload) => _runs.FailAsync(payload);
-    public Task TaskPaused(TaskPausedDto payload) => _runs.MarkPausedAsync(payload);
+    public async Task TaskProgress(TaskProgressDto payload)
+    {
+        await _runs.RecordProgressAsync(payload);
+        await _workers.BumpLastSeenAsync(Context.ConnectionId);
+    }
+
+    public async Task TaskComplete(TaskCompleteDto payload)
+    {
+        await _runs.CompleteAsync(payload);
+        await _workers.BumpLastSeenAsync(Context.ConnectionId);
+    }
+
+    public async Task TaskError(TaskErrorDto payload)
+    {
+        await _runs.FailAsync(payload);
+        await _workers.BumpLastSeenAsync(Context.ConnectionId);
+    }
+
+    public async Task TaskPaused(TaskPausedDto payload)
+    {
+        await _runs.MarkPausedAsync(payload);
+        await _workers.BumpLastSeenAsync(Context.ConnectionId);
+    }
 }

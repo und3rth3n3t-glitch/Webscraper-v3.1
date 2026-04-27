@@ -396,16 +396,30 @@ namespace WebScrape.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("domain");
 
+                    b.Property<DateTimeOffset?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_synced_at");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("name");
+
+                    b.Property<string>("OriginClientId")
+                        .HasColumnType("text")
+                        .HasColumnName("origin_client_id");
 
                     b.Property<int>("SchemaVersion")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(3)
                         .HasColumnName("schema_version");
+
+                    b.Property<bool>("Shared")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("shared");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -418,10 +432,33 @@ namespace WebScrape.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_scraper_configs");
 
-                    b.HasIndex("UserId")
-                        .HasDatabaseName("ix_scraper_configs_user_id");
+                    b.HasIndex("UserId", "Shared")
+                        .HasDatabaseName("ix_scraper_configs_user_id_shared");
 
                     b.ToTable("scraper_configs", (string)null);
+                });
+
+            modelBuilder.Entity("WebScrape.Data.Entities.ScraperConfigSubscription", b =>
+                {
+                    b.Property<Guid>("ScraperConfigId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("scraper_config_id");
+
+                    b.Property<Guid>("WorkerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("worker_id");
+
+                    b.Property<DateTimeOffset>("LastPulledAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_pulled_at");
+
+                    b.HasKey("ScraperConfigId", "WorkerId")
+                        .HasName("pk_scraper_config_subscriptions");
+
+                    b.HasIndex("WorkerId")
+                        .HasDatabaseName("ix_scraper_config_subscriptions_worker_id");
+
+                    b.ToTable("scraper_config_subscriptions", (string)null);
                 });
 
             modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>
@@ -766,6 +803,27 @@ namespace WebScrape.Data.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("WebScrape.Data.Entities.ScraperConfigSubscription", b =>
+                {
+                    b.HasOne("WebScrape.Data.Entities.ScraperConfigEntity", "Config")
+                        .WithMany("Subscriptions")
+                        .HasForeignKey("ScraperConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_scraper_config_subscriptions_scraper_configs_scraper_config");
+
+                    b.HasOne("WebScrape.Data.Entities.WorkerConnection", "Worker")
+                        .WithMany()
+                        .HasForeignKey("WorkerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_scraper_config_subscriptions_worker_connections_worker_id");
+
+                    b.Navigation("Config");
+
+                    b.Navigation("Worker");
+                });
+
             modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>
                 {
                     b.HasOne("WebScrape.Data.Entities.TaskBlock", "ParentBlock")
@@ -817,6 +875,11 @@ namespace WebScrape.Data.Migrations
                     b.Navigation("ApiKey");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("WebScrape.Data.Entities.ScraperConfigEntity", b =>
+                {
+                    b.Navigation("Subscriptions");
                 });
 
             modelBuilder.Entity("WebScrape.Data.Entities.TaskBlock", b =>

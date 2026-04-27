@@ -69,4 +69,18 @@ public class ApiKeyService : IApiKeyService
         await _db.SaveChangesAsync(ct);
         return true;
     }
+
+    public async Task<ApiKeyDto?> RenameAsync(Guid userId, Guid id, string newName, CancellationToken ct = default)
+    {
+        var trimmed = newName?.Trim() ?? "";
+        if (trimmed.Length == 0) return null;
+
+        var key = await _db.ApiKeys.FirstOrDefaultAsync(k => k.Id == id && k.UserId == userId, ct);
+        if (key is null) return null;
+        if (key.RevokedAt is not null) return null;
+
+        key.Name = trimmed;
+        await _db.SaveChangesAsync(ct);
+        return _mapper.Map<ApiKeyDto>(key);
+    }
 }

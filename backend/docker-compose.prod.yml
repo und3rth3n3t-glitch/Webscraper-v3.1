@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:17
+    env_file: .env.prod
+    volumes:
+      - pgdata-prod:/var/lib/postgresql/data
+    restart: unless-stopped
+    # No ports: only the server reaches the DB via the docker network.
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env.prod
+    depends_on:
+      - db
+    expose:
+      - "8080"
+    restart: unless-stopped
+    # No ports: a reverse proxy (Caddy/Traefik) handles ingress + TLS.
+    # See README.md "Production deployment" for how to wire one in.
+
+volumes:
+  pgdata-prod:

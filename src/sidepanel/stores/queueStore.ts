@@ -16,6 +16,7 @@ interface QueueState {
   addTask: (task: QueueTask) => void;
   setCurrentTask: (taskId: string | null) => void;
   updateTaskStatus: (taskId: string, status: QueueTask['status']) => void;
+  setTaskProgress: (taskId: string, progress: { stepLabel: string; termIndex?: number }) => void;
   completeTask: (taskId: string, result: TaskResult) => void;
   failTask: (taskId: string, error: string) => void;
   pauseTask: (taskId: string, reason: QueueTask['pausedReason']) => void;
@@ -23,6 +24,7 @@ interface QueueState {
   clearCompleted: () => void;
   clearPending: () => void;
   removeTask: (taskId: string) => void;
+  seedFromSnapshot: (snapshot: { active: QueueTask | null; pending: QueueTask[]; recent: QueueTask[] }) => void;
 }
 
 const ZERO_STATS: QueueStats = { total: 0, pending: 0, completed: 0, failed: 0 };
@@ -58,6 +60,11 @@ export const useQueueStore = create<QueueState>((set) => ({
       const tasks = s.tasks.map((t) => (t.id === taskId ? { ...t, status } : t));
       return { tasks, stats: recompute(tasks) };
     }),
+
+  setTaskProgress: (taskId, progress) =>
+    set((s) => ({
+      tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, progress } : t)),
+    })),
 
   completeTask: (taskId, result) =>
     set((s) => {
@@ -105,5 +112,23 @@ export const useQueueStore = create<QueueState>((set) => ({
     set((s) => {
       const tasks = s.tasks.filter((t) => t.id !== taskId);
       return { tasks, currentTaskId: s.currentTaskId === taskId ? null : s.currentTaskId, stats: recompute(tasks) };
+    }),
+
+  seedFromSnapshot: (snapshot) =>
+    set((s) => {
+      const existingIds = new Set(s.tasks.map((t) => t.id));
+      const toAdd = [
+        ...(snapshot.active ? [snapshot.active] : []),
+        ...snapshot.pending,
+        ...snapshot.recent,
+      ].filter((t) => !existingIds.has(t.id));
+      if (toAdd.length === 0) return s;
+      const tasks = [...s.tasks, ...toAdd];
+      const activeIsNew = snapshot.active !== null && !existingIds.has(snapshot.active.id);
+      return {
+        tasks,
+        stats: recompute(tasks),
+        currentTaskId: s.currentTaskId ?? (activeIsNew ? snapshot.active!.id : null),
+      };
     }),
 }));

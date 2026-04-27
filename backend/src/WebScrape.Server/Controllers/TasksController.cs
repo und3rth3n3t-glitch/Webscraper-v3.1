@@ -89,6 +89,7 @@ public class TasksController : ControllerBase
             ExpansionOutcome.Forbidden => StatusCode(StatusCodes.Status403Forbidden, new { error = preview.Error }),
             ExpansionOutcome.BatchEmpty => UnprocessableEntity(new { code = "BATCH_EMPTY", error = preview.Error }),
             ExpansionOutcome.BatchTooLarge => UnprocessableEntity(new { code = "BATCH_TOO_LARGE", count = preview.Count, cap = IQueueExpansionService.BatchCap, error = preview.Error }),
+            ExpansionOutcome.NestedLoopUnsupported => UnprocessableEntity(new { code = "NESTED_LOOP_UNSUPPORTED", error = preview.Error }),
             _ => StatusCode(StatusCodes.Status500InternalServerError),
         };
     }

@@ -10,7 +10,7 @@ namespace WebScrape.Server.Seed;
 public static class InitialSeed
 {
     public const string AdminEmail = "admin@local";
-    public const string AdminPassword = "admin";
+    public const string AdminPassword = "admin123";
     public const string DemoConfigName = "Demo Local Fixture";
     public const string DemoTaskName = "Demo Task";
 

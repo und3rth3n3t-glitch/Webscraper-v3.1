@@ -77,6 +77,7 @@ public class RunsController : ControllerBase
             RunBatchOutcome.WorkerOffline => Conflict(new { error = result.Error }),
             RunBatchOutcome.BatchEmpty    => UnprocessableEntity(new { code = "BATCH_EMPTY", error = result.Error }),
             RunBatchOutcome.BatchTooLarge => UnprocessableEntity(new { code = "BATCH_TOO_LARGE", error = result.Error }),
+            RunBatchOutcome.NestedLoopUnsupported => UnprocessableEntity(new { code = "NESTED_LOOP_UNSUPPORTED", error = result.Error }),
             _                              => StatusCode(StatusCodes.Status500InternalServerError),
         };
     }

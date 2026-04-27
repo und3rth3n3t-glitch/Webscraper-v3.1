@@ -16,10 +16,19 @@ using WebScrape.Services.Security;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseSerilog((ctx, lc) => lc
-    .ReadFrom.Configuration(ctx.Configuration)
-    .WriteTo.Console()
-    .WriteTo.File("logs/webscrape-.log", rollingInterval: RollingInterval.Day));
+builder.Host.UseSerilog((ctx, lc) =>
+{
+    lc.ReadFrom.Configuration(ctx.Configuration)
+      .WriteTo.Console()
+      .WriteTo.File("logs/webscrape-.log", rollingInterval: RollingInterval.Day);
+
+    var seqEnabled = ctx.Configuration.GetValue<bool>("Serilog:Seq:Enabled");
+    var seqUrl = ctx.Configuration["Serilog:Seq:ServerUrl"];
+    if (seqEnabled && !string.IsNullOrWhiteSpace(seqUrl))
+    {
+        lc.WriteTo.Seq(seqUrl);
+    }
+});
 
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? throw new InvalidOperationException("ConnectionStrings:Default is required");
@@ -31,7 +40,7 @@ builder.Services.AddDbContext<WebScrapeDbContext>(options =>
 builder.Services
     .AddIdentity<User, IdentityRole<Guid>>(opts =>
     {
-        opts.Password.RequiredLength = 5;
+        opts.Password.RequiredLength = 8;
         opts.Password.RequireDigit = false;
         opts.Password.RequireUppercase = false;
         opts.Password.RequireLowercase = false;
@@ -93,7 +102,10 @@ builder.Services.AddScoped<IWorkerNotifier, ScraperHubWorkerNotifier>();
 
 builder.Services.AddAutoMapper(typeof(AutoMapperProfile));
 
-builder.Services.AddSignalR()
+builder.Services.AddSignalR(hubOpts =>
+{
+    hubOpts.MaximumReceiveMessageSize = 10 * 1024 * 1024; // 10 MB
+})
     .AddJsonProtocol(opts =>
     {
         opts.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;

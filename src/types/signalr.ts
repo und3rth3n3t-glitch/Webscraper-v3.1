@@ -1,4 +1,4 @@
-import type { IterationResult } from './extraction';
+import type { WireIteration } from '../content/shaping/types';
 import type { DataMapping, ScraperConfig } from './config';
 
 export interface QueueTask {
@@ -12,6 +12,7 @@ export interface QueueTask {
   createdAt: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
   pausedReason?: 'cloudflare' | 'awaitUserAction';
+  progress?: { stepLabel: string; termIndex?: number };
   result?: TaskResult;
   error?: string;
   inlineConfig?: ScraperConfig;
@@ -56,8 +57,14 @@ export interface TaskResult {
   configId: string;
   configName: string;
   status: 'success' | 'failed' | 'paused';
-  iterations: IterationResult[];
+  iterations: WireIteration[];
   dataMapping?: DataMapping;
   totalTimeMs: number;
   timestamp: string;
+}
+
+export interface QueueSnapshot {
+  active: QueueTask | null;
+  pending: QueueTask[];
+  recent: QueueTask[];
 }

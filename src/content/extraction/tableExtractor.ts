@@ -35,27 +35,28 @@ export function extractTable(element: Element | null): Record<string, unknown>[]
   return [];
 }
 
-export function extractTableHeaders(table: Element): string[] {
+export function extractTableHeadersWithPaths(table: Element): { flatKey: string; path: string[] }[] {
   const thead = table.querySelector('thead');
   const headerRows = thead ? Array.from(thead.querySelectorAll('tr')) : detectHeaderRows(table);
-
   if (headerRows.length === 0) return [];
-
   const totalCols = getTableColumnCount(table);
   if (totalCols === 0) return [];
-
   const matrix = buildHeaderMatrix(headerRows, totalCols);
-
-  const headers: string[] = [];
+  const result: { flatKey: string; path: string[] }[] = [];
   for (let col = 0; col < totalCols; col++) {
     const parts = matrix
       .map((row) => row[col] || '')
       .filter(Boolean)
       .filter((v, i, a) => v !== a[i - 1]);
-    headers.push(parts.join('.') || `Column ${col + 1}`);
+    const path = parts.length > 0 ? parts : [`Column ${col + 1}`];
+    const flatKey = parts.length > 0 ? parts.join('.') : `Column ${col + 1}`;
+    result.push({ flatKey, path });
   }
+  return result;
+}
 
-  return headers;
+export function extractTableHeaders(table: Element): string[] {
+  return extractTableHeadersWithPaths(table).map((h) => h.flatKey);
 }
 
 function buildHeaderMatrix(headerRows: Element[], totalCols: number): string[][] {
@@ -66,11 +67,13 @@ function buildHeaderMatrix(headerRows: Element[], totalCols: number): string[][]
     const row = Array<string>(totalCols).fill('');
     const cells = Array.from(headerRows[rowIdx].querySelectorAll('th, td'));
     let colCursor = 0;
+    const rowspanCols = new Set<number>();
 
     for (let c = 0; c < totalCols; c++) {
       const key = `${rowIdx},${c}`;
       if (occupied[key]) {
         row[c] = occupied[key].text;
+        rowspanCols.add(c);
         const remaining = occupied[key].remaining - 1;
         if (remaining > 0) occupied[`${rowIdx + 1},${c}`] = { text: occupied[key].text, remaining };
         delete occupied[key];
@@ -78,7 +81,7 @@ function buildHeaderMatrix(headerRows: Element[], totalCols: number): string[][]
     }
 
     for (const cell of cells) {
-      while (colCursor < totalCols && row[colCursor]) colCursor++;
+      while (colCursor < totalCols && rowspanCols.has(colCursor)) colCursor++;
       if (colCursor >= totalCols) break;
 
       const text = (cell instanceof HTMLElement ? cell.innerText : cell.textContent || '').trim();

@@ -1,9 +1,9 @@
 import { ScraperHubConnection } from './signalrConnection';
 import type { SwToOffscreenMessage } from '../types/messages';
+import { dbg, ensureDebugInit } from '../utils/debugLog';
 
 const hub = new ScraperHubConnection();
-
-console.log('[Offscreen] Loaded at', new Date().toISOString());
+ensureDebugInit();
 
 // Notify the SW that this context is ready to receive messages.
 browser.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => {});
@@ -11,7 +11,7 @@ browser.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => {});
 browser.runtime.onMessage.addListener(
   (rawMessage: unknown, _sender, sendResponse) => {
     const message = rawMessage as SwToOffscreenMessage & { _fromSW?: boolean };
-    console.log('[Offscreen] Got message', message.type, 'fromSW=', !!message._fromSW);
+    dbg('[Offscreen] Got message', message.type, 'fromSW=', !!message._fromSW);
     // Ignore direct broadcasts from the sidepanel — only process messages
     // tagged by the SW relay to avoid double hub.connect() from the broadcast.
     if (!message._fromSW) return;
@@ -54,8 +54,8 @@ browser.runtime.onMessage.addListener(
         return;
 
       case 'GET_CONNECTION_STATUS':
-        sendResponse({ connected: hub.isConnected() });
-        return true as const;
+        sendResponse({ status: hub.getStatus() });
+        return;
     }
   },
 );

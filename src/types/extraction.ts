@@ -1,19 +1,17 @@
+import type { WireIteration } from '../content/shaping/types';
+
+export type { WireIteration };
+export type { ColumnType } from '../content/shaping/types';
+
 export interface ScrapingResult {
   configId: string;
   configName: string;
   scrapedAt: string;
   sourceUrl: string;
-  iterations: IterationResult[];
+  iterations: WireIteration[];
   totalTimeMs: number;
   aborted?: boolean;
-}
-
-export interface IterationResult {
-  searchTerm: string | null;
-  data: Record<string, unknown>[];
-  status: 'success' | 'error' | 'skipped';
-  error?: string;
-  pageUrls?: string[];
+  guardBlocked?: boolean;
 }
 
 export interface ApiCall {

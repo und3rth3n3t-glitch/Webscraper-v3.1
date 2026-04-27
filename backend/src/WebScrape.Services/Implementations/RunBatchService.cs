@@ -51,11 +51,13 @@ public class RunBatchService : IRunBatchService
             case ExpansionOutcome.Forbidden: return new(RunBatchOutcome.Forbidden, null, 0, 0, preview.Error);
             case ExpansionOutcome.BatchEmpty: return new(RunBatchOutcome.BatchEmpty, null, 0, 0, preview.Error);
             case ExpansionOutcome.BatchTooLarge: return new(RunBatchOutcome.BatchTooLarge, null, 0, 0, preview.Error);
+            case ExpansionOutcome.NestedLoopUnsupported: return new(RunBatchOutcome.NestedLoopUnsupported, null, 0, 0, preview.Error);
         }
 
         var task = await _db.Tasks.Include(t => t.Blocks).FirstAsync(t => t.Id == taskId, ct);
         var configIds = preview.Results.Select(r => r.ScraperConfigId).Distinct().ToList();
         var configs = await _db.ScraperConfigs.Where(c => configIds.Contains(c.Id)).ToListAsync(ct);
+        var sharedIds = configs.Where(c => c.Shared).Select(c => c.Id).ToHashSet();
 
         var snapshot = JsonSerializer.SerializeToDocument(new
         {
@@ -120,10 +122,10 @@ public class RunBatchService : IRunBatchService
                 Id = run.Id.ToString(),
                 ConfigId = r.ScraperConfigId.ToString(),
                 ConfigName = r.ConfigName,
-                SearchTerms = new(),
+                SearchTerms = r.SearchTerms,
                 Priority = 0,
                 CreatedAt = run.RequestedAt,
-                InlineConfig = r.PatchedConfigJson,
+                InlineConfig = sharedIds.Contains(r.ScraperConfigId) ? null : r.PatchedConfigJson,
                 IterationLabel = r.IterationLabel,
                 IterationAssignments = r.Assignments.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
             };

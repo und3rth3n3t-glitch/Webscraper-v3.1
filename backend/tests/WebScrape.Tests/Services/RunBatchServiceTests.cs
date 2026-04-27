@@ -86,23 +86,28 @@ public class RunBatchServiceTests
     }
 
     [Fact]
-    public async Task CreateBatch_dispatches_one_per_iteration_and_marks_sent()
+    public async Task CreateBatch_dispatches_one_bundled_job_and_marks_sent()
     {
+        // 3-term loop + 1 scrape → 1 bundled job with SearchTerms = ["v0","v1","v2"]
         var s = await Build(workerOnline: true, loopValues: 3);
-        s.Notifier.Setup(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        QueueTaskDto? captured = null;
+        s.Notifier.Setup(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()))
+            .Callback<string, QueueTaskDto, CancellationToken>((_, dto, _) => captured = dto)
+            .Returns(Task.CompletedTask);
 
         var result = await s.Svc.CreateAndDispatchAsync(s.UserId, s.TaskId, s.WorkerId);
 
         Assert.Equal(RunBatchOutcome.Created, result.Outcome);
-        Assert.Equal(3, result.DispatchedCount);
+        Assert.Equal(1, result.DispatchedCount);
         Assert.Equal(0, result.FailedCount);
-        s.Notifier.Verify(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()), Times.Exactly(3));
+        s.Notifier.Verify(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()), Times.Once());
 
         var runs = await s.Db.RunItems.ToListAsync();
-        Assert.Equal(3, runs.Count);
-        Assert.All(runs, r => Assert.Equal(RunItemStatus.Sent, r.Status));
-        Assert.All(runs, r => Assert.NotNull(r.IterationLabel));
-        Assert.All(runs, r => Assert.NotNull(r.IterationAssignments));
+        Assert.Single(runs);
+        Assert.Equal(RunItemStatus.Sent, runs[0].Status);
+
+        Assert.NotNull(captured);
+        Assert.Equal(new[] { "v0", "v1", "v2" }, captured!.SearchTerms);
     }
 
     [Fact]
@@ -135,9 +140,55 @@ public class RunBatchServiceTests
     [Fact]
     public async Task CreateBatch_marks_only_failing_item_failed_when_one_dispatch_throws()
     {
-        var s = await Build(loopValues: 3);
+        // Use 2 sibling scrape blocks under one loop → 2 bundled jobs.
+        // First dispatch succeeds, second throws → 1 dispatched, 1 failed.
+        var db = TestDb.CreateInMemory();
+        var notifier = new Mock<IWorkerNotifier>(MockBehavior.Strict);
+        var userId = Guid.NewGuid();
+        var configId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var loopId = Guid.NewGuid();
+
+        db.Users.Add(new User { Id = userId, UserName = "u@x", Email = "u@x" });
+        db.ScraperConfigs.Add(new ScraperConfigEntity
+        {
+            Id = configId, UserId = userId, Name = "demo", Domain = "example.com",
+            ConfigJson = JsonDocument.Parse("""{"steps":[{"id":"s1","type":"setInput","options":{}}]}"""),
+            SchemaVersion = 3, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
+        });
+        db.Tasks.Add(new TaskEntity { Id = taskId, UserId = userId, Name = "T", CreatedAt = DateTimeOffset.UtcNow });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = loopId, TaskId = taskId, ParentBlockId = null, BlockType = BlockType.Loop, OrderIndex = 0,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { name = "loop1", values = new[] { "a", "b" } })),
+        });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = Guid.NewGuid(), TaskId = taskId, ParentBlockId = loopId, BlockType = BlockType.Scrape, OrderIndex = 0,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { scraperConfigId = configId.ToString(), stepBindings = new { } })),
+        });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = Guid.NewGuid(), TaskId = taskId, ParentBlockId = loopId, BlockType = BlockType.Scrape, OrderIndex = 1,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { scraperConfigId = configId.ToString(), stepBindings = new { } })),
+        });
+        var workerId = Guid.NewGuid();
+        db.WorkerConnections.Add(new WorkerConnection
+        {
+            Id = workerId, UserId = userId, Name = "w", ApiKeyId = Guid.NewGuid(), CurrentConnection = "conn-1",
+        });
+        await db.SaveChangesAsync();
+
+        var scrape = new ScrapeBlockExpander();
+        var all = new List<IBlockExpander>();
+        var loop = new LoopBlockExpander(all);
+        all.Add(loop);
+        all.Add(scrape);
+        var expander = new QueueExpansionService(db, all);
+        var svc = new RunBatchService(db, TestDb.CreateMapper(), expander, notifier.Object, new RunCsvExporter(), NullLogger<RunBatchService>.Instance);
+
         var calls = 0;
-        s.Notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()))
+        notifier.Setup(n => n.SendReceiveTaskAsync(It.IsAny<string>(), It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>()))
             .Returns(() =>
             {
                 calls++;
@@ -145,15 +196,15 @@ public class RunBatchServiceTests
                 return Task.CompletedTask;
             });
 
-        var result = await s.Svc.CreateAndDispatchAsync(s.UserId, s.TaskId, s.WorkerId);
+        var result = await svc.CreateAndDispatchAsync(userId, taskId, workerId);
 
-        Assert.Equal(2, result.DispatchedCount);
+        Assert.Equal(1, result.DispatchedCount);
         Assert.Equal(1, result.FailedCount);
 
-        var runs = await s.Db.RunItems.OrderBy(r => r.RequestedAt).ToListAsync();
+        var runs = await db.RunItems.OrderBy(r => r.RequestedAt).ToListAsync();
+        Assert.Equal(2, runs.Count);
         Assert.Equal(RunItemStatus.Sent,   runs[0].Status);
         Assert.Equal(RunItemStatus.Failed, runs[1].Status);
-        Assert.Equal(RunItemStatus.Sent,   runs[2].Status);
     }
 
     [Fact]
@@ -168,15 +219,60 @@ public class RunBatchServiceTests
     [Fact]
     public async Task GetAsync_returns_batch_with_run_items()
     {
-        var s = await Build(loopValues: 2);
-        s.Notifier.Setup(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var result = await s.Svc.CreateAndDispatchAsync(s.UserId, s.TaskId, s.WorkerId);
+        // 2 sibling scrape blocks in one loop → 2 bundled jobs → 2 RunItems in batch.
+        var db = TestDb.CreateInMemory();
+        var notifier = new Mock<IWorkerNotifier>(MockBehavior.Strict);
+        var userId = Guid.NewGuid();
+        var configId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var loopId = Guid.NewGuid();
 
-        var detail = await s.Svc.GetAsync(s.UserId, result.BatchId!.Value);
+        db.Users.Add(new User { Id = userId, UserName = "u@x", Email = "u@x" });
+        db.ScraperConfigs.Add(new ScraperConfigEntity
+        {
+            Id = configId, UserId = userId, Name = "demo", Domain = "example.com",
+            ConfigJson = JsonDocument.Parse("""{"steps":[{"id":"s1","type":"setInput","options":{}}]}"""),
+            SchemaVersion = 3, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
+        });
+        db.Tasks.Add(new TaskEntity { Id = taskId, UserId = userId, Name = "T", CreatedAt = DateTimeOffset.UtcNow });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = loopId, TaskId = taskId, ParentBlockId = null, BlockType = BlockType.Loop, OrderIndex = 0,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { name = "loop1", values = new[] { "a", "b" } })),
+        });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = Guid.NewGuid(), TaskId = taskId, ParentBlockId = loopId, BlockType = BlockType.Scrape, OrderIndex = 0,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { scraperConfigId = configId.ToString(), stepBindings = new { } })),
+        });
+        db.TaskBlocks.Add(new TaskBlock
+        {
+            Id = Guid.NewGuid(), TaskId = taskId, ParentBlockId = loopId, BlockType = BlockType.Scrape, OrderIndex = 1,
+            ConfigJsonb = JsonDocument.Parse(JsonSerializer.Serialize(new { scraperConfigId = configId.ToString(), stepBindings = new { } })),
+        });
+        var workerId = Guid.NewGuid();
+        db.WorkerConnections.Add(new WorkerConnection
+        {
+            Id = workerId, UserId = userId, Name = "w", ApiKeyId = Guid.NewGuid(), CurrentConnection = "conn-1",
+        });
+        await db.SaveChangesAsync();
+
+        var scrape = new ScrapeBlockExpander();
+        var all = new List<IBlockExpander>();
+        var loop = new LoopBlockExpander(all);
+        all.Add(loop);
+        all.Add(scrape);
+        var expander = new QueueExpansionService(db, all);
+        var svc = new RunBatchService(db, TestDb.CreateMapper(), expander, notifier.Object, new RunCsvExporter(), NullLogger<RunBatchService>.Instance);
+        notifier.Setup(n => n.SendReceiveTaskAsync("conn-1", It.IsAny<QueueTaskDto>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+
+        var result = await svc.CreateAndDispatchAsync(userId, taskId, workerId);
+
+        var detail = await svc.GetAsync(userId, result.BatchId!.Value);
         Assert.NotNull(detail);
         Assert.Equal(2, detail!.RunItems.Count);
 
-        var asOther = await s.Svc.GetAsync(Guid.NewGuid(), result.BatchId.Value);
+        var asOther = await svc.GetAsync(Guid.NewGuid(), result.BatchId.Value);
         Assert.Null(asOther);
     }
 

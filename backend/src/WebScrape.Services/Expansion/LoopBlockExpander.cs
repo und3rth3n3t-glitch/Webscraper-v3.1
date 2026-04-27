@@ -25,26 +25,25 @@ public class LoopBlockExpander : IBlockExpander
     public IEnumerable<ExpansionResult> Expand(TaskBlock block, ExpansionContext ctx, ExpansionFrame frame)
     {
         var values = ReadLoopValues(block);
+        // Empty loop: one run with an empty search term, consistent with prior behaviour.
+        var searchTerms = values.Count == 0 ? new List<string> { "" } : values;
+
         var children = ctx.AllBlocks
             .Where(b => b.ParentBlockId == block.Id)
             .OrderBy(b => b.OrderIndex)
             .ToList();
 
-        // Empty values means a single frame with empty assignment for this loop's id,
-        // consistent with M2.1 dispatch behaviour.
-        var iterationValues = values.Count == 0 ? new List<string> { "" } : values;
+        // Bundle all terms into one frame. Children receive the full list; the
+        // per-iteration cartesian walk is replaced by searchTerms on the wire.
+        var childFrame = new ExpansionFrame(
+            LoopAssignments: new Dictionary<Guid, string>(),
+            SearchTerms: searchTerms);
 
-        foreach (var value in iterationValues)
+        foreach (var child in children)
         {
-            var nextAssignments = new Dictionary<Guid, string>(frame.LoopAssignments) { [block.Id] = value };
-            var nextFrame = new ExpansionFrame(nextAssignments);
-
-            foreach (var child in children)
-            {
-                if (!ByType.TryGetValue(child.BlockType, out var expander)) continue;
-                foreach (var result in expander.Expand(child, ctx, nextFrame))
-                    yield return result;
-            }
+            if (!ByType.TryGetValue(child.BlockType, out var expander)) continue;
+            foreach (var result in expander.Expand(child, ctx, childFrame))
+                yield return result;
         }
     }
 

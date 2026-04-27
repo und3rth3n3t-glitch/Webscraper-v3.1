@@ -59,16 +59,27 @@ export default function Configs() {
               <th>Domain</th>
               <th>Schema</th>
               <th>Updated</th>
+              <th>Sync</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {configs.map((c) => (
               <tr key={c.id}>
-                <td>{c.name}</td>
+                <td>
+                  <div>{c.name}</div>
+                  {c.originWorkerName && (
+                    <div className="form-hint" style={{ marginTop: 2 }}>
+                      Imported from {c.originWorkerName}
+                    </div>
+                  )}
+                </td>
                 <td><span className="domain-badge">{c.domain}</span></td>
                 <td>{c.schemaVersion}</td>
                 <td>{fmtDate(c.updatedAt)}</td>
+                <td>
+                  {c.shared && <span className="meta-badge">Synced</span>}
+                </td>
                 <td style={{ display: 'flex', gap: 'var(--spacing-xs)', justifyContent: 'flex-end' }}>
                   <Link to={`/configs/${c.id}/edit`} className="btn btn-secondary btn-sm">Edit</Link>
                   <button

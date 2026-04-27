@@ -34,7 +34,7 @@ The skeleton for remote operation **already exists**:
 
 ### Backend reference ([c:\Users\und3r\templating-system](c:\Users\und3r\templating-system), bbwt3)
 
-- **Stack**: .NET 8.0, ASP.NET Core MVC controllers, EF Core 8, Autofac, AutoMapper, Serilog, multi-DB (MySQL/Postgres/SQL Server).
+- **Stack**: .NET 9.0, ASP.NET Core MVC controllers, EF Core 9, Autofac, AutoMapper, Serilog, multi-DB (MySQL/Postgres/SQL Server).
 - **Modular monolith** via `ModuleLinker` reflection: each module implements `IDependenciesModuleLinkage`, `ISignalRModuleLinkage`, `IDbModelCreateModuleLinkage`, etc.
 - **Auth**: ASP.NET Core Identity + cookies (web) + JWT. **No PAT support today** — needs new entity + scheme handler.
 - **SignalR**: 7 hubs in bbwt3, all registered via `ISignalRModuleLinkage.MapHubs(IEndpointRouteBuilder)`. Auth flows through `app.UseAuthentication()`; SignalR client passes Bearer via `accessTokenFactory`.
@@ -117,13 +117,13 @@ c:\Users\und3r\webscrape\
 ### NuGet packages (pinned)
 
 **WebScrape.Server**:
-- `Microsoft.AspNetCore.Identity.EntityFrameworkCore` 8.0.*
+- `Microsoft.AspNetCore.Identity.EntityFrameworkCore` 9.0.*
 - SignalR is part of `Microsoft.AspNetCore.App` (no separate package)
-- `Npgsql.EntityFrameworkCore.PostgreSQL` 8.0.*
-- `EFCore.NamingConventions` 8.0.* (for `UseSnakeCaseNamingConvention`)
-- `Microsoft.EntityFrameworkCore.Design` 8.0.* (for `dotnet ef`)
+- `Npgsql.EntityFrameworkCore.PostgreSQL` 9.0.*
+- `EFCore.NamingConventions` 9.0.* (for `UseSnakeCaseNamingConvention`)
+- `Microsoft.EntityFrameworkCore.Design` 9.0.* (for `dotnet ef`)
 - `Autofac.Extensions.DependencyInjection` 9.0.*
-- `Serilog.AspNetCore` 8.0.*, `Serilog.Sinks.File` 6.0.*, `Serilog.Sinks.Console` 6.0.*
+- `Serilog.AspNetCore` 9.0.*, `Serilog.Sinks.File` 6.0.*, `Serilog.Sinks.Console` 6.0.*
 - `AutoMapper.Extensions.Microsoft.DependencyInjection` 12.0.*
 - `Konscious.Security.Cryptography.Argon2` 1.3.* (PAT hashing)
 - `AspNetCoreRateLimit` 5.0.* (rate limiting)
@@ -133,8 +133,8 @@ c:\Users\und3r\webscrape\
 - `Microsoft.NET.Test.Sdk` 17.*
 - `Moq` 4.20.*
 - `AutoFixture` 4.18.*, `AutoFixture.Xunit2` 4.18.*
-- `Microsoft.EntityFrameworkCore.InMemory` 8.0.* (unit-test DbContext)
-- `Microsoft.AspNetCore.Mvc.Testing` 8.0.* (integration tests)
+- `Microsoft.EntityFrameworkCore.InMemory` 9.0.* (unit-test DbContext)
+- `Microsoft.AspNetCore.Mvc.Testing` 9.0.* (integration tests)
 
 ### Run commands (pinned)
 

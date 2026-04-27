@@ -1,40 +1,51 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { useScraperConfigs, useTask } from '../api/queries';
 import { useSaveTask } from '../api/mutations';
-import BindingsEditor from '../components/BindingsEditor';
 import type { ValidationErrorDto } from '../api/types';
-import { autoBindSteps, buildSaveDto, parseSetInputSteps } from '../utils/taskEditor';
-import type { EditorState } from '../utils/taskEditor';
 import { axiosErrorMessage } from '../utils/errorMessages';
+import {
+  addLoopChild,
+  addScrapeChild,
+  buildSaveBlocks,
+  buildTree,
+  deleteBlock,
+  hydrateFromDto,
+  reorderSibling,
+  updateLoop,
+  updateScrape,
+  type BlocksAction,
+  type EditorBlock,
+  type LoopEditorBlock,
+  type ScrapeEditorBlock,
+} from '../utils/taskTree';
+import TaskTreePanel from '../components/taskEditor/TaskTreePanel';
+import LoopBlockInspector from '../components/taskEditor/LoopBlockInspector';
+import ScrapeBlockInspector from '../components/taskEditor/ScrapeBlockInspector';
 
-const LOOP_NAME = 'loop1';
-
-function newEditorState(): EditorState {
-  return {
-    name: '',
-    loopBlockId: crypto.randomUUID(),
-    scrapeBlockId: crypto.randomUUID(),
-    loopName: LOOP_NAME,
-    loopValues: [],
-    scraperConfigId: '',
-    stepBindings: {},
-  };
+function blocksReducer(state: EditorBlock[], action: BlocksAction): EditorBlock[] {
+  switch (action.type) {
+    case 'HYDRATE': return action.blocks;
+    case 'ADD_LOOP': return addLoopChild(state, action.parentId, action.newId);
+    case 'ADD_SCRAPE': return addScrapeChild(state, action.parentId, action.newId);
+    case 'DELETE': return deleteBlock(state, action.id);
+    case 'REORDER': return reorderSibling(state, action.id, action.direction);
+    case 'UPDATE_LOOP': return updateLoop(state, action.id, action.patch);
+    case 'UPDATE_SCRAPE': return updateScrape(state, action.id, action.patch);
+    default: return state;
+  }
 }
 
 function mapValidationError(e: ValidationErrorDto): string {
   switch (e.code) {
-    case 'MISSING_TASK_NAME':
-      return 'Add a name for this task.';
-    case 'CONFIG_NOT_OWNED':
-      return 'Pick a scraper config you own.';
+    case 'MISSING_TASK_NAME': return 'Add a name for this task.';
+    case 'CONFIG_NOT_OWNED': return 'Pick a scraper config you own.';
     case 'BINDING_LITERAL_MISSING_VALUE':
       return `Step '${e.stepId ?? '?'}' is set to a literal value but has no text.`;
     case 'LOOP_REF_NON_ANCESTOR':
       return `Step '${e.stepId ?? '?'}' references a loop that doesn't apply here.`;
-    default:
-      return `Couldn't save this task (${e.code}).`;
+    default: return `Couldn't save this task (${e.code}).`;
   }
 }
 
@@ -47,88 +58,72 @@ export default function TaskEditor() {
   const { data: configs } = useScraperConfigs();
   const save = useSaveTask();
 
-  const [state, setState] = useState<EditorState>(newEditorState);
+  const [taskName, setTaskName] = useState('');
+  const [blocks, dispatch] = useReducer(blocksReducer, []);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  const [complexStructure, setComplexStructure] = useState(false);
 
   useEffect(() => {
     if (!isEdit || !existingTask || hydrated) return;
-
-    const loopBlock = existingTask.blocks.find(
-      (b) => b.blockType === 'loop' && b.parentBlockId === null,
-    );
-    const scrapeBlock = loopBlock
-      ? existingTask.blocks.find(
-          (b) => b.blockType === 'scrape' && b.parentBlockId === loopBlock.id,
-        )
-      : undefined;
-
-    if (!loopBlock || !scrapeBlock) {
-      setComplexStructure(true);
-      setHydrated(true);
-      return;
-    }
-
-    if (existingTask.blocks.length > 2) {
-      setComplexStructure(true);
-    }
-
-    setState({
-      name: existingTask.name,
-      loopBlockId: loopBlock.id,
-      scrapeBlockId: scrapeBlock.id,
-      loopName: loopBlock.loop?.name ?? LOOP_NAME,
-      loopValues: loopBlock.loop?.values ?? [],
-      scraperConfigId: scrapeBlock.scrape?.scraperConfigId ?? '',
-      stepBindings: scrapeBlock.scrape?.stepBindings ?? {},
-    });
+    setTaskName(existingTask.name);
+    const editorBlocks = hydrateFromDto(existingTask.blocks);
+    dispatch({ type: 'HYDRATE', blocks: editorBlocks });
+    const firstRoot = [...existingTask.blocks]
+      .filter((b) => b.parentBlockId === null)
+      .sort((a, b) => a.orderIndex - b.orderIndex)[0];
+    if (firstRoot) setSelectedId(firstRoot.id);
     setHydrated(true);
   }, [isEdit, existingTask, hydrated]);
 
-  const selectedConfig = useMemo(
-    () => configs?.find((c) => c.id === state.scraperConfigId) ?? null,
-    [configs, state.scraperConfigId],
+  // Clear selection if the selected block was deleted
+  useEffect(() => {
+    if (selectedId && !blocks.find((b) => b.id === selectedId)) {
+      setSelectedId(null);
+    }
+  }, [blocks, selectedId]);
+
+  const selectedBlock = useMemo(
+    () => (selectedId ? (blocks.find((b) => b.id === selectedId) ?? null) : null),
+    [blocks, selectedId],
   );
 
-  const setInputSteps = useMemo(
-    () => (selectedConfig ? parseSetInputSteps(selectedConfig.configJson) : []),
-    [selectedConfig],
-  );
+  const treeRoots = useMemo(() => buildTree(blocks), [blocks]);
 
-  const handleConfigChange = (configId: string) => {
-    const config = configs?.find((c) => c.id === configId);
-    const steps = config ? parseSetInputSteps(config.configJson) : [];
-    setState((s) => ({
-      ...s,
-      scraperConfigId: configId,
-      stepBindings: autoBindSteps(steps, s.loopBlockId),
-    }));
-  };
+  const configNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of configs ?? []) map[c.id] = c.name;
+    return map;
+  }, [configs]);
+
+  const handleAddAndSelect = useCallback(
+    (blockType: 'loop' | 'scrape', parentId: string | null) => {
+      if (blockType === 'scrape' && parentId === null) return;
+      const newId = crypto.randomUUID();
+      if (blockType === 'loop') {
+        dispatch({ type: 'ADD_LOOP', parentId, newId });
+      } else {
+        dispatch({ type: 'ADD_SCRAPE', parentId: parentId!, newId });
+      }
+      setSelectedId(newId);
+    },
+    [],
+  );
 
   const saveError = useMemo(() => {
     const e = save.error;
     if (!e) return null;
     if (axios.isAxiosError(e) && e.response?.status === 400) {
       const data = e.response.data as { errors?: ValidationErrorDto[] };
-      if (data.errors?.length) {
-        return data.errors.map(mapValidationError).join(' ');
-      }
+      if (data.errors?.length) return data.errors.map(mapValidationError).join(' ');
     }
     return axiosErrorMessage(e, "Couldn't save this task.");
   }, [save.error]);
 
-  const configMissing =
-    isEdit &&
-    hydrated &&
-    !!state.scraperConfigId &&
-    configs !== undefined &&
-    !configs.find((c) => c.id === state.scraperConfigId);
-
-  const canSave = !complexStructure && !!state.name.trim() && !!state.scraperConfigId;
+  const canSave = !!taskName.trim() && blocks.length > 0;
 
   const submit = async () => {
     if (!canSave) return;
-    await save.mutateAsync({ id, body: buildSaveDto(state) });
+    await save.mutateAsync({ id, body: { name: taskName, blocks: buildSaveBlocks(blocks) } });
     nav('/tasks');
   };
 
@@ -162,75 +157,63 @@ export default function TaskEditor() {
         </div>
       </div>
 
-      {complexStructure && (
-        <div className="run-banner run-banner-warning">
-          This task has a more complex structure than this editor supports. You can view it but not save changes.
-        </div>
-      )}
-
       {saveError && <div className="danger-banner">{saveError}</div>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 'var(--spacing-lg)', alignItems: 'start' }}>
+      <div className="form-group" style={{ maxWidth: 400 }}>
+        <label className="form-label" htmlFor="task-name">Name</label>
+        <input
+          id="task-name"
+          className="form-input"
+          value={taskName}
+          onChange={(e) => setTaskName(e.target.value)}
+          placeholder="e.g. Bing news search"
+        />
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '280px 1fr',
+          gap: 'var(--spacing-lg)',
+          alignItems: 'start',
+        }}
+      >
+        <TaskTreePanel
+          roots={treeRoots}
+          blocks={blocks}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onAddAndSelect={handleAddAndSelect}
+          dispatch={dispatch}
+          configNames={configNames}
+        />
+
         <div>
-          <div className="form-group">
-            <label className="form-label" htmlFor="task-name">Name</label>
-            <input
-              id="task-name"
-              className="form-input"
-              value={state.name}
-              onChange={(e) => setState((s) => ({ ...s, name: e.target.value }))}
-              placeholder="e.g. Bing news search"
+          {blocks.length === 0 && (
+            <div className="empty-state">
+              <div className="empty-state-title">This task is empty</div>
+              <div className="empty-state-desc">
+                Add a loop to iterate values, or a scrape to grab a single page.
+              </div>
+            </div>
+          )}
+          {blocks.length > 0 && !selectedBlock && (
+            <div className="form-hint">Select a block on the left to configure it.</div>
+          )}
+          {selectedBlock?.blockType === 'loop' && (
+            <LoopBlockInspector
+              block={selectedBlock as LoopEditorBlock}
+              dispatch={dispatch}
             />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label" htmlFor="task-config">Scraper config</label>
-            <select
-              id="task-config"
-              className="form-select"
-              value={state.scraperConfigId}
-              onChange={(e) => handleConfigChange(e.target.value)}
-            >
-              <option value="">— pick a config —</option>
-              {configMissing && (
-                <option value={state.scraperConfigId} disabled>
-                  {state.scraperConfigId} (deleted)
-                </option>
-              )}
-              {(configs ?? []).map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label" htmlFor="task-values">Loop values</label>
-            <textarea
-              id="task-values"
-              className="form-textarea"
-              rows={8}
-              value={state.loopValues.join('\n')}
-              onChange={(e) => {
-                const vals = e.target.value.split('\n').map((v) => v.trimEnd());
-                setState((s) => ({ ...s, loopValues: vals }));
-              }}
-              placeholder="One value per line. Each value runs the scrape once."
+          )}
+          {selectedBlock?.blockType === 'scrape' && (
+            <ScrapeBlockInspector
+              block={selectedBlock as ScrapeEditorBlock}
+              blocks={blocks}
+              configs={configs ?? []}
+              dispatch={dispatch}
             />
-            <div className="form-hint">One value per line. Each value runs the scrape once.</div>
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="form-label" style={{ marginBottom: 'var(--spacing-sm)' }}>
-            Input bindings
-          </div>
-          <BindingsEditor
-            steps={setInputSteps}
-            loopBlockId={state.loopBlockId}
-            loopName={state.loopName}
-            stepBindings={state.stepBindings}
-            onChange={(bindings) => setState((s) => ({ ...s, stepBindings: bindings }))}
-          />
+          )}
         </div>
       </div>
     </div>

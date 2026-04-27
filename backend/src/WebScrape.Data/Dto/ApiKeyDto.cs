@@ -22,3 +22,8 @@ public class CreateApiKeyResponseDto
     public string Prefix { get; set; } = "";
     public string Token { get; set; } = "";
 }
+
+public class RenameApiKeyDto
+{
+    public string Name { get; set; } = "";
+}

@@ -107,4 +107,75 @@ public class ApiKeyServiceTests
         var stored = await db.ApiKeys.SingleAsync(k => k.Id == aliceKey.Id);
         Assert.Null(stored.RevokedAt);
     }
+
+    [Fact]
+    public async Task Rename_updates_name_for_owner()
+    {
+        var (svc, db, _) = Build();
+        var userId = await SeedUserAsync(db);
+        var created = await svc.CreateAsync(userId, "Old name");
+
+        var renamed = await svc.RenameAsync(userId, created.Id, "New name");
+
+        Assert.NotNull(renamed);
+        Assert.Equal("New name", renamed!.Name);
+        var stored = await db.ApiKeys.SingleAsync(k => k.Id == created.Id);
+        Assert.Equal("New name", stored.Name);
+    }
+
+    [Fact]
+    public async Task Rename_trims_whitespace()
+    {
+        var (svc, db, _) = Build();
+        var userId = await SeedUserAsync(db);
+        var created = await svc.CreateAsync(userId, "Old");
+
+        var renamed = await svc.RenameAsync(userId, created.Id, "  Trimmed  ");
+
+        Assert.Equal("Trimmed", renamed!.Name);
+    }
+
+    [Fact]
+    public async Task Rename_returns_null_for_whitespace_name()
+    {
+        var (svc, db, _) = Build();
+        var userId = await SeedUserAsync(db);
+        var created = await svc.CreateAsync(userId, "Original");
+
+        var renamed = await svc.RenameAsync(userId, created.Id, "   ");
+
+        Assert.Null(renamed);
+        var stored = await db.ApiKeys.SingleAsync(k => k.Id == created.Id);
+        Assert.Equal("Original", stored.Name);
+    }
+
+    [Fact]
+    public async Task Rename_returns_null_for_other_users_key()
+    {
+        var (svc, db, _) = Build();
+        var alice = await SeedUserAsync(db);
+        var bob = await SeedUserAsync(db);
+        var aliceKey = await svc.CreateAsync(alice, "alice-key");
+
+        var renamed = await svc.RenameAsync(bob, aliceKey.Id, "hijacked");
+
+        Assert.Null(renamed);
+        var stored = await db.ApiKeys.SingleAsync(k => k.Id == aliceKey.Id);
+        Assert.Equal("alice-key", stored.Name);
+    }
+
+    [Fact]
+    public async Task Rename_returns_null_for_revoked_key()
+    {
+        var (svc, db, _) = Build();
+        var userId = await SeedUserAsync(db);
+        var created = await svc.CreateAsync(userId, "Original");
+        await svc.RevokeAsync(userId, created.Id);
+
+        var renamed = await svc.RenameAsync(userId, created.Id, "Renamed");
+
+        Assert.Null(renamed);
+        var stored = await db.ApiKeys.SingleAsync(k => k.Id == created.Id);
+        Assert.Equal("Original", stored.Name);
+    }
 }

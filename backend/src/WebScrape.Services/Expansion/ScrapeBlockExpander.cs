@@ -34,39 +34,56 @@ public class ScrapeBlockExpander : IBlockExpander
                 if (string.IsNullOrEmpty(stepId)) continue;
                 liveSetInputStepIds.Add(stepId);
 
-                var (resolved, warning) = ResolveBinding(stepId, stepBindings, frame);
-                if (warning is not null)
-                    ctx.Warnings.Add(warning with { BlockId = block.Id, ScraperConfigId = config.Id, StepId = stepId });
-
-                if (stepNode["options"] is not JsonObject options)
+                if (!stepBindings.TryGetValue(stepId, out var binding))
                 {
-                    options = new JsonObject();
-                    stepNode["options"] = options;
+                    ctx.Warnings.Add(new ExpansionWarning(ExpansionWarningCodes.NewStepUnbound,
+                        BlockId: block.Id, ScraperConfigId: config.Id, StepId: stepId));
+                    continue;
                 }
-                options["literalValue"] = resolved;
+
+                switch (binding.Kind)
+                {
+                    case "literal":
+                        // Bake static values as before.
+                        if (stepNode["options"] is not JsonObject opts)
+                        {
+                            opts = new JsonObject();
+                            stepNode["options"] = opts;
+                        }
+                        opts["literalValue"] = binding.Value ?? "";
+                        break;
+
+                    case "loopRef":
+                        // Remove any stale literalValue so the extension falls through to searchTerms[i].
+                        if (stepNode["options"] is JsonObject loopOpts)
+                            loopOpts.Remove("literalValue");
+                        break;
+
+                    default: // "unbound"
+                        ctx.Warnings.Add(new ExpansionWarning(ExpansionWarningCodes.BindingUnbound,
+                            BlockId: block.Id, ScraperConfigId: config.Id, StepId: stepId));
+                        break;
+                }
             }
         }
 
         foreach (var stepId in stepBindings.Keys)
         {
             if (!liveSetInputStepIds.Contains(stepId))
-                ctx.Warnings.Add(new ExpansionWarning(
-                    ExpansionWarningCodes.StepNoLongerExists,
-                    BlockId: block.Id,
-                    ScraperConfigId: config.Id,
-                    StepId: stepId));
+                ctx.Warnings.Add(new ExpansionWarning(ExpansionWarningCodes.StepNoLongerExists,
+                    BlockId: block.Id, ScraperConfigId: config.Id, StepId: stepId));
         }
 
         var patched = JsonSerializer.SerializeToElement(node);
-        var label = BuildIterationLabel(frame.LoopAssignments, ctx.LoopNamesById);
 
         yield return new ExpansionResult(
             ScrapeBlockId: block.Id,
             ScraperConfigId: config.Id,
             ConfigName: config.Name,
-            Assignments: new Dictionary<Guid, string>(frame.LoopAssignments),
-            IterationLabel: label,
-            PatchedConfigJson: patched);
+            Assignments: new Dictionary<Guid, string>(),
+            IterationLabel: "",
+            PatchedConfigJson: patched,
+            SearchTerms: new List<string>(frame.SearchTerms));
     }
 
     private static (Guid scraperConfigId, Dictionary<string, BindingPayload> bindings) ReadScrapeConfig(TaskBlock block)
@@ -96,30 +113,4 @@ public class ScrapeBlockExpander : IBlockExpander
     }
 
     private record BindingPayload(string Kind, string? Value, Guid? LoopBlockId);
-
-    private static (string resolved, ExpansionWarning? warning) ResolveBinding(string stepId, Dictionary<string, BindingPayload> bindings, ExpansionFrame frame)
-    {
-        if (!bindings.TryGetValue(stepId, out var binding))
-            return ("", new ExpansionWarning(ExpansionWarningCodes.NewStepUnbound));
-
-        switch (binding.Kind)
-        {
-            case "literal":
-                return (binding.Value ?? "", null);
-            case "loopRef":
-                if (binding.LoopBlockId.HasValue && frame.LoopAssignments.TryGetValue(binding.LoopBlockId.Value, out var v))
-                    return (v, null);
-                return ("", new ExpansionWarning(ExpansionWarningCodes.BindingUnbound));
-            case "unbound":
-                return ("", new ExpansionWarning(ExpansionWarningCodes.BindingUnbound));
-            default:
-                return ("", new ExpansionWarning(ExpansionWarningCodes.BindingUnbound));
-        }
-    }
-
-    private static string BuildIterationLabel(IReadOnlyDictionary<Guid, string> assignments, IReadOnlyDictionary<Guid, string> loopNames)
-    {
-        if (assignments.Count == 0) return "";
-        return string.Join(", ", assignments.Select(kv => $"{(loopNames.TryGetValue(kv.Key, out var n) ? n : kv.Key.ToString())}={kv.Value}"));
-    }
 }

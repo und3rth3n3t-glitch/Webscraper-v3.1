@@ -1,4 +1,4 @@
-import { resolveElement, resolveWithAlternate } from './elementResolution';
+﻿import { resolveElement, resolveWithAlternate } from './elementResolution';
 import { extractPageBlocks, mergePages, type PageContent } from '../extraction/pageBlockExtractor';
 import { findBestMatch } from '../../common/tokenMatcher';
 import {
@@ -9,6 +9,8 @@ import {
   randomDelay,
   scrollToBottom,
   selectOption,
+  humanSkimScroll,
+  smoothScrollToElement,
 } from './humanBehavior';
 import {
   waitForElement,
@@ -17,9 +19,14 @@ import {
   CHART_LIB_PATTERN,
 } from '../extraction/domUtils';
 import { extractTable } from '../extraction/tableExtractor';
+import { extractTableHeadersWithPaths } from '../extraction/tableExtractor';
 import { extractChartData } from '../extraction/chartExtractor';
+import { shapeTable, shapeChart } from '../shaping';
+import type { WireOutput, WireIteration } from '../shaping';
+import { slugify, disambiguate } from '../../utils/slugify';
 import { paginatePages, paginateElement } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
+import { swLog } from '../../utils/swLog';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
 import { detectCloudflareChallenge, waitForChallengeToClear } from '../cloudflareDetector';
 import { evaluateDetectionRules } from '../detectionRules';
@@ -38,7 +45,7 @@ import type {
   SelectorDescriptor,
   StepCondition,
 } from '../../types/config';
-import type { ScrapingResult, IterationResult } from '../../types/extraction';
+import type { ScrapingResult } from '../../types/extraction';
 
 let abortSignal = false;
 let flowRunning = false;
@@ -46,7 +53,7 @@ let flowRunning = false;
 // Runtime-toggleable: when true, scrape output includes verbose diagnostic
 // fields (saved-descriptor dumps on chart-resolution failures, etc.). The
 // initial value is loaded from chrome.storage.local prefs (key set by the
-// "Developer Options → Show debug info in scrape output" checkbox in the
+// "Developer Options â†’ Show debug info in scrape output" checkbox in the
 // sidepanel) and kept in sync via storage.onChanged. Off by default.
 let DEBUG = false;
 
@@ -71,6 +78,7 @@ try {
 const NAVIGATING_STEP_TYPES = new Set(['click', 'bestMatch', 'goBack', 'navigateTo']);
 
 export function abortFlow(): void {
+  swLog('[abortFlow] called | flowRunning was:', flowRunning, '| stack:', new Error().stack);
   abortSignal = true;
   flowRunning = false;
 }
@@ -82,7 +90,7 @@ export interface ExecuteFlowParams {
   afk?: boolean;
   startTermIndex?: number;
   startLoopStepIndex?: number;
-  previousIterations?: IterationResult[];
+  previousIterations?: WireIteration[];
 }
 
 export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingResult> {
@@ -96,7 +104,9 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     previousIterations = [],
   } = params;
 
+  swLog('[executeFlow] called | taskId:', taskId, '| flowRunning:', flowRunning, '| searchTerms:', searchTerms, '| startTermIndex:', startTermIndex, '| startLoopStepIndex:', startLoopStepIndex, '| previousIterations.length:', previousIterations.length);
   if (flowRunning) {
+    swLog('[executeFlow] BLOCKED by flowRunning guard — original flow still running, suppressing duplicate');
     return {
       configId: config.id,
       configName: config.name,
@@ -105,6 +115,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       iterations: [],
       totalTimeMs: 0,
       aborted: true,
+      guardBlocked: true,
     };
   }
   flowRunning = true;
@@ -137,21 +148,25 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
         const e = err as Error;
         if (e.message === 'ABORTED') {
           result.totalTimeMs = Date.now() - startTime;
+          swLog('[executeFlow] setup ABORTED return | taskId:', taskId, '| iterations:', result.iterations.length, '| totalTimeMs:', result.totalTimeMs);
           return { ...result, aborted: true };
         }
+        swLog('[executeFlow] setup phase error | taskId:', taskId, '| name:', e.name, '| msg:', e.message, '| stack:', e.stack);
         sendProgress({ phase: 'setup', stepLabel: '', status: 'error', taskId });
       }
     }
 
     const terms = searchTerms.length > 0 ? searchTerms : [null];
+    const usedIterKeys = new Set<string>(previousIterations.map((it) => it.iterationKey));
 
     for (let i = startTermIndex; i < terms.length; i++) {
       const term = terms[i];
       checkAbort();
 
       sendProgress({ phase: 'loop', termIndex: i, stepLabel: '', status: 'running', taskId });
+      swLog('[executeFlow] iter START | taskId:', taskId, '| termIndex:', i, '| term:', term, '| url:', window.location.href);
 
-      const iterData: Record<string, unknown>[] = [];
+      const iterOutputs: Record<string, WireOutput> = {};
       let iterStatus: 'success' | 'error' | 'skipped' = 'success';
       let iterError: string | undefined;
 
@@ -160,8 +175,14 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
 
         for (let si = siStart; si < loopSteps.length; si++) {
           checkAbort();
+          // Occasional "thinking" pause: 2 % of steps get a 1–3 s pre-delay to
+          // raise the noise floor against per-session timing-pattern analysis.
+          if (Math.random() < 0.02) {
+            await randomDelay(1000, 3000);
+          }
           const step = loopSteps[si];
           sendProgress({ phase: 'loop', termIndex: i, stepLabel: step.label, status: 'running', taskId });
+          swLog('[executeFlow] step START | taskId:', taskId, '| termIndex:', i, '| stepIndex:', si, '| type:', step.type, '| label:', step.label, '| url:', window.location.href);
 
           const isNavigating = NAVIGATING_STEP_TYPES.has(step.type);
 
@@ -182,6 +203,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
           }
 
           let stepData: Record<string, unknown> | null = null;
+          const urlBeforeStep = window.location.href;
           try {
             stepData = await executeStep(
               step,
@@ -192,54 +214,64 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
               taskId,
             );
 
+            // Post-navigation settle: real users glance at the new page before acting.
+            // Only fires when the step was a navigating type AND the URL actually changed.
+            if (isNavigating && window.location.href !== urlBeforeStep) {
+              await randomDelay(300, 800);
+            }
+            swLog('[executeFlow] step OK  | taskId:', taskId, '| stepIndex:', si, '| type:', step.type, '| stepData keys:', stepData ? Object.keys(stepData) : null, '| url:', window.location.href);
+
             if (isNavigating) {
               // Check for cloudflare after navigation
               const challenge = detectCloudflareChallenge();
               if (challenge.detected && challenge.type) {
+                swLog('[executeFlow] cloudflare detected post-navigate | taskId:', taskId, '| type:', challenge.type);
                 browser.runtime.sendMessage({
                   type: 'FLOW_PAUSED',
                   payload: { reason: 'cloudflare', challengeType: challenge.type, taskId },
                 });
 
                 await Promise.race([waitForChallengeToClear().promise, waitForResumeSignal()]);
+                swLog('[executeFlow] cloudflare cleared/resumed | taskId:', taskId);
 
                 browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
               }
             }
           } finally {
-            // Always cancel the continuation for navigating steps — including when
+            // Always cancel the continuation for navigating steps â€” including when
             // the step throws (e.g. SkipIterationError). Without this, a phantom
             // continuation sits in the background and fires on the next navigation,
             // corrupting subsequent iterations.
             if (isNavigating) {
               try {
                 browser.runtime.sendMessage({ type: 'CANCEL_CONTINUATION' });
+                swLog('[executeFlow] CANCEL_CONTINUATION sent | taskId:', taskId, '| stepIndex:', si);
               } catch { /* expected */ }
             }
           }
 
           if (stepData !== null && step.type === 'scrape') {
-            const scraped = stepData as Record<string, unknown>;
-            for (const [, value] of Object.entries(scraped)) {
-              if (Array.isArray(value)) {
-                iterData.push(...(value as Record<string, unknown>[]));
-              } else if (value !== null && typeof value === 'object') {
-                iterData.push(value as Record<string, unknown>);
-              }
-            }
+            Object.assign(iterOutputs, stepData as Record<string, WireOutput>);
+            swLog('[executeFlow] scrape merged into iterOutputs | taskId:', taskId, '| stepIndex:', si, '| outputKeys:', Object.keys(iterOutputs));
           }
         }
 
         sendProgress({ phase: 'loop', termIndex: i, stepLabel: '', status: 'success', taskId });
+        swLog('[executeFlow] iter END success | taskId:', taskId, '| termIndex:', i, '| outputKeys:', Object.keys(iterOutputs));
       } catch (err) {
         const e = err as Error;
+        swLog('[executeFlow] iter CATCH | taskId:', taskId, '| termIndex:', i, '| name:', e.name, '| msg:', e.message, '| stack:', e.stack);
         if (e.message === 'ABORTED') {
           result.iterations.push({
+            schemaVersion: 1,
+            iterationKey: disambiguate(slugify(term ?? '') || 'default', usedIterKeys),
+            iterationLabel: term ?? '',
             searchTerm: term,
-            data: iterData,
+            outputs: iterOutputs,
             status: 'error',
             error: 'Aborted by user',
           });
+          swLog('[executeFlow] iter ABORTED — breaking outer loop | taskId:', taskId, '| termIndex:', i);
           break;
         }
         if (e.name === 'SkipIterationError') {
@@ -253,18 +285,23 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
         }
       }
 
+      const iterKey = disambiguate(slugify(term ?? '') || 'default', usedIterKeys);
+      usedIterKeys.add(iterKey);
       result.iterations.push({
+        schemaVersion: 1,
+        iterationKey: iterKey,
+        iterationLabel: term ?? '',
         searchTerm: term,
-        data: iterData,
+        outputs: iterOutputs,
         status: iterStatus,
         error: iterError,
       });
 
       if (i < terms.length - 1) {
-        // Inter-iteration pause (2–8s)
+        // Inter-iteration pause (2â€“8s)
         await randomDelay(2000, 8000);
 
-        // Every 25 iterations: longer idle pause (15–60s)
+        // Every 25 iterations: longer idle pause (15â€“60s)
         if (i > 0 && i % 25 === 0) {
           await randomDelay(15_000, 60_000);
         }
@@ -272,18 +309,22 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     }
 
     result.totalTimeMs = Date.now() - startTime;
+    swLog('[executeFlow] normal return | taskId:', taskId, '| iterations.length:', result.iterations.length, '| totalTimeMs:', result.totalTimeMs);
     return result;
   } finally {
+    swLog('[executeFlow] finally â€” clearing flowRunning | taskId:', taskId);
     flowRunning = false;
   }
 }
 
-// ── Resume signal ──
+// â”€â”€ Resume signal â”€â”€
 
 function waitForResumeSignal(): Promise<void> {
+  swLog('[waitForResumeSignal] arming listener');
   return new Promise((resolve) => {
     const handler = (msg: unknown): void => {
       if ((msg as Record<string, unknown>)?.type === 'RESUME_AFTER_CLOUDFLARE') {
+        swLog('[waitForResumeSignal] RESUME_AFTER_CLOUDFLARE received');
         browser.runtime.onMessage.removeListener(handler);
         resolve();
       }
@@ -292,7 +333,7 @@ function waitForResumeSignal(): Promise<void> {
   });
 }
 
-// ── Wait after action ──
+// â”€â”€ Wait after action â”€â”€
 
 async function waitAfterAction(
   opts: { waitMethod?: string; waitAfterMs?: number; waitForSelector?: SelectorDescriptor | null },
@@ -301,28 +342,36 @@ async function waitAfterAction(
 ): Promise<void> {
   const waitMethod = opts.waitMethod || defaultMethod;
   const waitMs = opts.waitAfterMs ?? 1500;
+  const wStart = Date.now();
+  const urlBefore = window.location.href;
+  swLog('[waitAfterAction] enter | method:', waitMethod, '| waitMs:', waitMs, '| urlBefore:', urlBefore);
 
   if (waitMethod === 'contentChange') {
     onProgress?.('Waiting for page to update...');
     try {
-      await waitForContentChange(document.body.textContent ?? '', 10000);
-    } catch {
-      onProgress?.('Page did not change within timeout — continuing');
+      const changed = await waitForContentChange(document.body.textContent ?? '', 10000);
+      swLog('[waitAfterAction] contentChange resolved | changed:', changed, '| ms:', Date.now() - wStart, '| urlAfter:', window.location.href);
+    } catch (err) {
+      swLog('[waitAfterAction] contentChange threw | ms:', Date.now() - wStart, '| err:', (err as Error).message);
+      onProgress?.('Page did not change within timeout â€” continuing');
     }
   } else if (waitMethod === 'element' && opts.waitForSelector) {
     onProgress?.('Waiting for element to appear...');
     const desc = opts.waitForSelector;
     try {
       await waitForElement(() => resolveElement(desc).element, 10000);
-    } catch {
-      onProgress?.('Wait-for element did not appear within timeout — continuing');
+      swLog('[waitAfterAction] element appeared | ms:', Date.now() - wStart, '| urlAfter:', window.location.href);
+    } catch (err) {
+      swLog('[waitAfterAction] element wait threw | ms:', Date.now() - wStart, '| err:', (err as Error).message);
+      onProgress?.('Wait-for element did not appear within timeout â€” continuing');
     }
   } else {
     await randomDelay(waitMs * 0.8, waitMs * 1.2);
+    swLog('[waitAfterAction] fixedDelay done | ms:', Date.now() - wStart, '| urlAfter:', window.location.href);
   }
 }
 
-// ── Step conditions ──
+// â”€â”€ Step conditions â”€â”€
 
 export function evaluateCondition(cond: StepCondition): boolean {
   try {
@@ -338,13 +387,13 @@ export function evaluateCondition(cond: StepCondition): boolean {
     }
     return true;
   } catch {
-    // Invalid regex, missing selector fields, or any unexpected throw → fail-closed.
+    // Invalid regex, missing selector fields, or any unexpected throw â†’ fail-closed.
     // Running a step on the wrong page is worse than skipping it.
     return false;
   }
 }
 
-// ── Step dispatch ──
+// â”€â”€ Step dispatch â”€â”€
 
 type OnProgress = ((msg: string) => void) | undefined;
 
@@ -397,6 +446,7 @@ async function executeSetInput(
   afk: boolean,
 ): Promise<null> {
   const opts = step.options;
+  swLog('[setInput] iterationIndex:', iterationIndex, '| literalValue:', opts.literalValue, '| searchTerm:', searchTerm, '| valueToType will be:', opts.literalValue ?? searchTerm ?? '');
 
   const el = await resolveWithRetry(
     step.selector!,
@@ -424,7 +474,7 @@ async function executeSetInput(
     await randomDelay(600, 1200);
   }
 
-  void iterationIndex; // No longer used — alternate is iteration-independent.
+  void iterationIndex; // No longer used â€” alternate is iteration-independent.
   void afk; // afk mode: typeText handles delays; no change needed for text input
   return null;
 }
@@ -478,7 +528,7 @@ async function executeBestMatch(
     // (e.g. search that sometimes hits disambiguation, sometimes the article directly).
     // Caveat: relies on container (and alternate) selectors being specific enough not
     // to exist on the "already-landed" page.
-    onProgress?.('Best-match container not found on this page — continuing as if already on destination');
+    onProgress?.('Best-match container not found on this page â€” continuing as if already on destination');
     return null;
   }
 
@@ -524,10 +574,15 @@ async function executeBestMatch(
   const displayScore = Math.min(score * 100, 100).toFixed(0);
   onProgress?.(`Clicking best match: "${text.substring(0, 50)}" (${displayScore}% match)`);
 
+  const clickHref = bestEl instanceof HTMLAnchorElement ? bestEl.href : '(non-anchor)';
+  swLog('[bestMatch] about to click | matchText:', text.substring(0, 80), '| score:', score, '| href:', clickHref, '| urlBefore:', window.location.href);
+
   await randomDelay(300, 800);
   await naturalClick(bestEl as HTMLElement, { afk });
 
+  swLog('[bestMatch] click done, entering waitAfterAction(contentChange) | urlAfterClick:', window.location.href);
   await waitAfterAction(opts, onProgress, 'contentChange');
+  swLog('[bestMatch] waitAfterAction returned | urlNow:', window.location.href);
 
   return { matchedText: text.substring(0, 100), matchScore: score };
 }
@@ -539,26 +594,72 @@ async function executeGoBack(step: GoBackStep, onProgress: OnProgress): Promise<
   return null;
 }
 
+async function scrapeElementToWire(
+  elConfig: ScrapeElementConfig,
+  onProgress: OnProgress,
+  afk: boolean,
+  paginationDelayMs: number | undefined,
+  usedKeys: Set<string>,
+): Promise<{ outputKey: string; output: WireOutput }> {
+  const baseKey = elConfig.outputKey?.trim()
+    ? slugify(elConfig.outputKey.trim())
+    : slugify(elConfig.name) || 'output';
+  const outputKey = disambiguate(baseKey, usedKeys);
+
+  const rawResult = await scrapeElement(elConfig, onProgress, afk, paginationDelayMs);
+
+  if (elConfig.detectedType === 'table' && Array.isArray(rawResult)) {
+    const { element: el } = resolveElement(elConfig.selector);
+    const tableEl = el
+      ? el.tagName === 'TABLE'
+        ? el
+        : el.querySelector('table')
+      : null;
+    const headerPaths = tableEl
+      ? extractTableHeadersWithPaths(tableEl as Element)
+      : (rawResult as Record<string, unknown>[]).length > 0
+        ? Object.keys((rawResult as Record<string, unknown>[])[0])
+            .filter((k) => k !== '_group')
+            .map((k) => ({ flatKey: k, path: [k] }))
+        : [];
+
+    const wireTable = shapeTable(rawResult as Record<string, unknown>[], headerPaths, elConfig);
+    wireTable.label = outputKey;
+    return { outputKey, output: wireTable };
+  }
+
+  if (elConfig.detectedType === 'chart') {
+    return { outputKey, output: shapeChart(rawResult, outputKey) };
+  }
+
+  return { outputKey, output: { kind: 'raw', data: rawResult } };
+}
+
 async function executeScrape(
   step: ScrapeStep,
   onProgress: OnProgress,
   afk: boolean,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, WireOutput>> {
   const opts = step.options;
-  const data: Record<string, unknown> = {};
+  const outputs: Record<string, WireOutput> = {};
+  swLog('[executeScrape] enter | mode:', opts.mode, '| elements:', opts.elements?.length ?? 0, '| url:', window.location.href);
 
   if (opts.mode === 'wholePage') {
     onProgress?.('Scraping whole page...');
     const pageData = await scrapeWholePage(opts, onProgress, afk);
-    Object.assign(data, pageData);
+    outputs['page'] = { kind: 'raw', data: pageData };
   } else {
+    const usedKeys = new Set<string>();
     for (const elConfig of opts.elements || []) {
       onProgress?.(`Scraping "${elConfig.name}"...`);
-      data[elConfig.name] = await scrapeElement(elConfig, onProgress, afk);
+      const { outputKey, output } = await scrapeElementToWire(elConfig, onProgress, afk, opts.paginationDelayMs, usedKeys);
+      usedKeys.add(outputKey);
+      outputs[outputKey] = output;
     }
   }
 
-  return data;
+  swLog('[executeScrape] exit | keys:', Object.keys(outputs));
+  return outputs;
 }
 
 async function executeSelectEach(
@@ -588,7 +689,7 @@ async function executeSelectEach(
     const waitMs = opts.waitAfterSelectMs ?? 1500;
     await randomDelay(waitMs * 0.7, waitMs * 1.3);
 
-    const optionData: Record<string, unknown> = {};
+    const optionData: Record<string, Record<string, WireOutput>> = {};
     for (const subStep of opts.subSteps || []) {
       checkAbort();
       if (subStep.type === 'scrape') {
@@ -621,9 +722,10 @@ async function executeCaptureApiCalls(step: CaptureApiCallsStep, onProgress: OnP
 async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnProgress, taskId?: string): Promise<null> {
   const opts = step.options;
   const evalResult = evaluateDetectionRules(opts.detectionRules);
+  swLog('[awaitUserAction] enter | taskId:', taskId, '| fired:', evalResult.fired, '| trigger:', evalResult.trigger, '| url:', window.location.href);
 
   if (!evalResult.fired) {
-    onProgress?.(`No obstruction detected — skipping pause`);
+    onProgress?.(`No obstruction detected â€” skipping pause`);
     return null;
   }
 
@@ -640,6 +742,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
   });
 
   await waitForResumeSignal();
+  swLog('[awaitUserAction] resume signal received | taskId:', taskId);
 
   browser.runtime.sendMessage({ type: 'FLOW_RESUMED' });
   return null;
@@ -660,36 +763,42 @@ async function executeNavigateTo(
     throw new Error(`navigateTo: invalid URL "${url}"`);
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`navigateTo: unsupported scheme "${parsed.protocol}" — only http(s) allowed`);
+    throw new Error(`navigateTo: unsupported scheme "${parsed.protocol}" â€” only http(s) allowed`);
   }
 
   onProgress?.(`Navigating to ${parsed.href}`);
   window.location.href = parsed.href;
 
-  // Page is unloading — block forever so the rest of the loop iteration never runs.
+  // Page is unloading â€” block forever so the rest of the loop iteration never runs.
   // The continuation registered at scrapingEngine.ts:166-179 will resume at si + 1
   // after the new page loads.
   await new Promise<null>(() => {});
   return null;
 }
 
-// ── Page-level scraping ──
+// â”€â”€ Page-level scraping â”€â”€
 
 async function scrapeWholePage(
   opts: ScrapeStep['options'],
   onProgress: OnProgress,
   afk: boolean,
 ): Promise<Record<string, unknown>> {
+  // Brief pre-scrape skim — humans glance over a page before extracting.
+  // Skipped when scrollToBottom is on (it does its own paging) or afk is on.
+  if (!opts.scrollToBottom && !afk) {
+    await humanSkimScroll();
+  }
+
   if (opts.scrollToBottom) {
     onProgress?.('Scrolling to load all content...');
     await scrollToBottom((scrollY, totalHeight) =>
       onProgress?.(`Scrolling... ${Math.round((scrollY / totalHeight) * 100)}%`),
-    );
+    { incrementVh: opts.scrollIncrementVh, delayMs: opts.scrollDelayMs });
   }
 
   if (opts.expandHidden) {
     onProgress?.('Expanding hidden sections...');
-    await expandHiddenElements();
+    await expandHiddenElements({ delayMs: opts.expandDelayMs });
   }
 
   const pages: PageContent[] = [];
@@ -700,8 +809,9 @@ async function scrapeWholePage(
     const pagesScraped = await paginatePages({
       paginationSelector: opts.paginationSelector,
       pageCount: opts.pageCount || 0,
+      paginationDelayMs: opts.paginationDelayMs,
       onPage: async () => {
-        if (opts.scrollToBottom) await scrollToBottom();
+        if (opts.scrollToBottom) await scrollToBottom(undefined, { incrementVh: opts.scrollIncrementVh, delayMs: opts.scrollDelayMs });
         pages.push(await extractPageBlocks());
       },
       onProgress,
@@ -714,7 +824,7 @@ async function scrapeWholePage(
   return { content: await extractPageBlocks(), pagesScraped: 1 };
 }
 
-// ── Element-level scraping ──
+// â”€â”€ Element-level scraping â”€â”€
 
 function findPaginationContainer(tableEl: HTMLElement, paginationDescriptor: SelectorDescriptor): Element {
   const { element: paginBtn } = resolveElement(paginationDescriptor);
@@ -748,8 +858,13 @@ async function scrapeElement(
   elConfig: ScrapeElementConfig,
   onProgress: OnProgress,
   afk: boolean,
+  paginationDelayMs?: number,
 ): Promise<unknown> {
   const el = await resolveWithRetry(elConfig.selector, null, onProgress, elConfig.name);
+
+  // Bring the target into the viewport before extracting. smoothScrollToElement
+  // early-returns if already visible. Not afk-gated — matches naturalClick.
+  await smoothScrollToElement(el);
 
   if (elConfig.detectedType === 'chart') {
     // Sanity check: does the resolved element actually look like a chart?
@@ -824,6 +939,7 @@ async function scrapeElement(
       await paginateElement({
         paginationSelector: elConfig.paginationSelector,
         paginationCount: elConfig.paginationCount || 0,
+        paginationDelayMs,
         container,
         onPage: async () => { allData.push(...scrapeCurrentPage()); },
         onProgress,
@@ -936,7 +1052,7 @@ async function extractContainer(element: HTMLElement): Promise<{ sections: unkno
   return { sections };
 }
 
-// ── Utilities ──
+// â”€â”€ Utilities â”€â”€
 
 function applyFieldFilter(rows: Record<string, unknown>[], fields: string[]): Record<string, unknown>[] {
   return rows.map((row) => {
@@ -1073,3 +1189,4 @@ function sendProgress(payload: {
     browser.runtime.sendMessage({ type: 'FLOW_PROGRESS', payload });
   } catch { /* extension context may be invalidated */ }
 }
+

@@ -12,5 +12,9 @@ public class ScraperConfigEntity
     public int SchemaVersion { get; set; } = 3;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    public bool Shared { get; set; } = false;
+    public DateTimeOffset? LastSyncedAt { get; set; }
+    public string? OriginClientId { get; set; }
     public User? User { get; set; }
+    public ICollection<ScraperConfigSubscription> Subscriptions { get; set; } = new List<ScraperConfigSubscription>();
 }

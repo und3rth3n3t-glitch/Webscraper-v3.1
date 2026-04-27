@@ -23,6 +23,7 @@ export default defineConfig({
     define: {
       __THEME_NAME__: JSON.stringify(themeName),
       __APP_VERSION__: JSON.stringify(appVersion),
+      __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
     },
   }),
 });

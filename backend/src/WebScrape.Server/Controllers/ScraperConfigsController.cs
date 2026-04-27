@@ -12,15 +12,19 @@ namespace WebScrape.Server.Controllers;
 public class ScraperConfigsController : ControllerBase
 {
     private readonly IScraperConfigService _configs;
+    private readonly IWorkerService _workers;
 
-    public ScraperConfigsController(IScraperConfigService configs)
+    public ScraperConfigsController(IScraperConfigService configs, IWorkerService workers)
     {
         _configs = configs;
+        _workers = workers;
     }
 
     [HttpGet]
-    public async Task<IActionResult> List(CancellationToken ct)
+    public async Task<IActionResult> List([FromQuery] bool? shared, CancellationToken ct)
     {
+        if (shared == true)
+            return Ok(await _configs.ListSharedAsync(User.GetUserId(), ct));
         return Ok(await _configs.ListAsync(User.GetUserId(), ct));
     }
 
@@ -35,16 +39,41 @@ public class ScraperConfigsController : ControllerBase
     [CookieCsrf]
     public async Task<IActionResult> Create([FromBody] CreateScraperConfigDto dto, CancellationToken ct)
     {
-        var created = await _configs.CreateAsync(User.GetUserId(), dto, ct);
-        return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
+        var workerId = await ResolveWorkerIdAsync(ct);
+        var result = await _configs.CreateAsync(User.GetUserId(), dto, workerId, ct);
+        return result.Outcome switch
+        {
+            CreateScraperConfigOutcome.Created => CreatedAtAction(nameof(Get), new { id = result.Dto.Id }, result.Dto),
+            CreateScraperConfigOutcome.Idempotent => Ok(result.Dto),
+            CreateScraperConfigOutcome.Conflict => StatusCode(StatusCodes.Status409Conflict, result.Dto),
+            _ => StatusCode(StatusCodes.Status500InternalServerError),
+        };
     }
 
     [HttpPut("{id:guid}")]
     [CookieCsrf]
-    public async Task<IActionResult> Update(Guid id, [FromBody] CreateScraperConfigDto dto, CancellationToken ct)
+    public async Task<IActionResult> Update(
+        Guid id,
+        [FromBody] CreateScraperConfigDto dto,
+        [FromHeader(Name = "If-Match")] string? ifMatch,
+        CancellationToken ct)
     {
-        var updated = await _configs.UpdateAsync(User.GetUserId(), id, dto, ct);
-        return updated is null ? NotFound() : Ok(updated);
+        var workerId = await ResolveWorkerIdAsync(ct);
+
+        // Cookie auth bypasses If-Match (canonical backend edit).
+        // PAT auth passes If-Match through — service enforces presence for shared configs.
+        var effectiveIfMatch = workerId.HasValue ? ifMatch : null;
+
+        var result = await _configs.UpdateAsync(User.GetUserId(), id, dto, effectiveIfMatch, workerId, ct);
+
+        return result.Outcome switch
+        {
+            UpdateScraperConfigOutcome.Updated => Ok(result.Dto),
+            UpdateScraperConfigOutcome.NotFound => NotFound(),
+            UpdateScraperConfigOutcome.PreconditionFailed => StatusCode(StatusCodes.Status412PreconditionFailed, result.Current),
+            UpdateScraperConfigOutcome.PreconditionRequired => StatusCode(428, new { error = "Shared config requires If-Match header on PAT requests" }),
+            _ => StatusCode(StatusCodes.Status500InternalServerError),
+        };
     }
 
     [HttpDelete("{id:guid}")]
@@ -67,4 +96,35 @@ public class ScraperConfigsController : ControllerBase
         };
     }
 
+    [HttpGet("{id:guid}/subscribers")]
+    public async Task<IActionResult> GetSubscribers(Guid id, CancellationToken ct)
+    {
+        var subs = await _configs.GetSubscribersAsync(User.GetUserId(), id, ct);
+        if (subs is null) return NotFound();
+        return Ok(subs);
+    }
+
+    [HttpPost("{id:guid}/subscribe")]
+    [CookieCsrf]
+    public async Task<IActionResult> Subscribe(Guid id, CancellationToken ct)
+    {
+        var workerId = await ResolveWorkerIdAsync(ct);
+        if (!workerId.HasValue) return Forbid();
+
+        var config = await _configs.GetAsync(User.GetUserId(), id, ct);
+        if (config is null) return NotFound();
+
+        await _configs.RecordSubscriptionAsync(id, workerId.Value, ct);
+        return Ok();
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private async Task<Guid?> ResolveWorkerIdAsync(CancellationToken ct)
+    {
+        var apiKeyId = User.TryGetApiKeyId();
+        if (!apiKeyId.HasValue) return null;
+        var worker = await _workers.GetWorkerByApiKeyAsync(User.GetUserId(), apiKeyId.Value, ct);
+        return worker?.Id;
+    }
 }

@@ -1,16 +1,27 @@
 import * as signalR from '@microsoft/signalr';
 import type { QueueTask } from '../types/signalr';
-
-type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+import type { ConnectionStatus } from '../types/messages';
+import { dbg } from '../utils/debugLog';
 
 export class ScraperHubConnection {
   private connection: signalR.HubConnection | null = null;
   private clientId = '';
   private extensionVersion = '';
+  // Queued invocations while connecting/reconnecting, drained once Connected.
+  private pendingInvocations: Array<{ method: string; args: unknown[] }> = [];
 
   async connect(serverUrl: string, token: string, clientId: string, version: string): Promise<void> {
     this.extensionVersion = version;
     if (this.connection) {
+      const s = this.connection.state;
+      if (
+        s === signalR.HubConnectionState.Connected ||
+        s === signalR.HubConnectionState.Connecting ||
+        s === signalR.HubConnectionState.Reconnecting
+      ) {
+        // Already live — don't tear down an active connection for a duplicate INIT_SIGNALR.
+        return;
+      }
       try { await this.connection.stop(); } catch { /* expected */ }
       this.connection = null;
     }
@@ -52,6 +63,7 @@ export class ScraperHubConnection {
       this.connection!
         .invoke('RegisterWorker', this.clientId, this.extensionVersion)
         .catch((err) => console.error('[SignalR] RegisterWorker after reconnect failed:', err));
+      this.drainPending();
     });
 
     this.connection.onclose((err) => {
@@ -61,6 +73,8 @@ export class ScraperHubConnection {
         type: 'CONNECTION_LOST',
         payload: { error: message },
       });
+      // Discard any pending invocations — connection is gone.
+      this.pendingInvocations = [];
     });
 
     try {
@@ -69,6 +83,7 @@ export class ScraperHubConnection {
       const message = (err as Error).message ?? 'Connection failed';
       this.emitStatus('error', message);
       this.connection = null;
+      this.pendingInvocations = [];
       throw err;
     }
 
@@ -76,16 +91,35 @@ export class ScraperHubConnection {
     browser.runtime.sendMessage({ type: 'CONNECTION_READY', payload: { clientId } });
 
     // RegisterWorker updates the backend DB — fire without blocking the connect promise.
-    console.log('[SignalR] Invoking RegisterWorker', { clientId, version, state: this.connection.state });
+    dbg('[SignalR] Invoking RegisterWorker', { clientId, version, state: this.connection.state });
     this.connection.invoke('RegisterWorker', clientId, version)
-      .then(() => console.log('[SignalR] RegisterWorker succeeded'))
+      .then(() => dbg('[SignalR] RegisterWorker succeeded'))
       .catch((err) => {
         console.error('[SignalR] RegisterWorker failed:', err);
       });
+
+    // Drain any invocations that arrived while we were connecting.
+    this.drainPending();
   }
 
   async invoke(method: string, ...args: unknown[]): Promise<void> {
-    if (this.connection?.state !== signalR.HubConnectionState.Connected) return;
+    if (!this.connection) {
+      // No connection object yet (connect() not yet called) — queue for after connect().
+      dbg('[SignalR] invoke queued (no connection):', method);
+      this.pendingInvocations.push({ method, args });
+      return;
+    }
+    if (this.connection.state === signalR.HubConnectionState.Disconnected) {
+      console.warn('[SignalR] invoke dropped (Disconnected):', method);
+      return;
+    }
+    if (this.connection.state !== signalR.HubConnectionState.Connected) {
+      // Queue for delivery once Connected (handles initial connect and auto-reconnect).
+      dbg('[SignalR] invoke queued (state:', this.connection.state, '):', method);
+      this.pendingInvocations.push({ method, args });
+      return;
+    }
+    dbg('[SignalR] invoke:', method);
     await this.connection.invoke(method, ...args);
   }
 
@@ -93,7 +127,19 @@ export class ScraperHubConnection {
     return this.connection?.state === signalR.HubConnectionState.Connected;
   }
 
+  getStatus(): ConnectionStatus {
+    if (!this.connection) return 'idle';
+    switch (this.connection.state) {
+      case signalR.HubConnectionState.Connected:     return 'connected';
+      case signalR.HubConnectionState.Reconnecting:  return 'reconnecting';
+      case signalR.HubConnectionState.Connecting:
+      case signalR.HubConnectionState.Disconnecting: return 'connecting';
+      default:                                        return 'idle';
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.pendingInvocations = [];
     if (!this.connection) {
       this.emitStatus('idle');
       return;
@@ -101,6 +147,15 @@ export class ScraperHubConnection {
     try { await this.connection.stop(); } catch { /* expected */ }
     this.connection = null;
     this.emitStatus('idle');
+  }
+
+  private drainPending(): void {
+    const pending = this.pendingInvocations.splice(0);
+    for (const { method, args } of pending) {
+      this.connection?.invoke(method, ...args).catch((err) =>
+        console.error(`[SignalR] Deferred invoke(${method}) failed:`, err),
+      );
+    }
   }
 
   private emitStatus(status: ConnectionStatus, error?: string): void {

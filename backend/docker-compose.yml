@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: webscrape
+      POSTGRES_USER: webscrape
+      POSTGRES_PASSWORD: webscrape
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - db
+    environment:
+      ConnectionStrings__Default: "Host=db;Database=webscrape;Username=webscrape;Password=webscrape"
+      ASPNETCORE_ENVIRONMENT: Development
+    ports:
+      - "5082:8080"
+
+volumes:
+  pgdata:

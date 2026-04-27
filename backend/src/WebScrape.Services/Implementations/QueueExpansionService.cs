@@ -30,6 +30,14 @@ public class QueueExpansionService : IQueueExpansionService
         var blocks = task.Blocks.ToList();
         var roots = blocks.Where(b => b.ParentBlockId is null).OrderBy(b => b.OrderIndex).ToList();
 
+        // Bundled expansion does not support nested loops. Reject early with a clear error.
+        var loopIds = blocks.Where(b => b.BlockType == BlockType.Loop).Select(b => b.Id).ToHashSet();
+        var hasNestedLoop = blocks.Any(b => b.BlockType == BlockType.Loop && b.ParentBlockId.HasValue && loopIds.Contains(b.ParentBlockId.Value));
+        if (hasNestedLoop)
+            return new ExpansionPreview(
+                ExpansionOutcome.NestedLoopUnsupported, 0, new(), new(),
+                "Nested loops are not yet supported. Place each scrape block in its own top-level loop.");
+
         var configIds = new HashSet<Guid>();
         foreach (var b in blocks.Where(b => b.BlockType == BlockType.Scrape))
         {
@@ -58,7 +66,7 @@ public class QueueExpansionService : IQueueExpansionService
             ConfigsById = configs,
         };
 
-        var emptyFrame = new ExpansionFrame(new Dictionary<Guid, string>());
+        var emptyFrame = new ExpansionFrame(new Dictionary<Guid, string>(), Array.Empty<string>());
         var results = new List<ExpansionResult>();
         foreach (var root in roots)
         {

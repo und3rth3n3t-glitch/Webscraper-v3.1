@@ -1,4 +1,5 @@
 import { startPicker, stopPicker } from '../content/picker/elementPicker';
+import { swLog } from '../utils/swLog';
 import { executeFlow, abortFlow } from '../content/scraping/scrapingEngine';
 import { generateSelectorDescriptor, resolveElement } from '../content/scraping/elementResolution';
 import { injectSelectorGenerator } from '../content/extraction/domUtils';
@@ -143,6 +144,7 @@ export default defineContentScript({
 
         case 'EXECUTE_FLOW': {
           const fp = payload as unknown as ExecuteFlowPayload;
+          swLog('[content] EXECUTE_FLOW received | taskId:', fp.taskId, '| searchTerms:', fp.searchTerms, '| startTermIndex:', fp.startTermIndex ?? 0, '| startLoopStepIndex:', fp.startLoopStepIndex ?? 0, '| previousIterations.length:', fp.previousIterations?.length ?? 0, '| inlineConfig.id:', (fp.config as Record<string,unknown>)?.id);
           executeFlow({
             config: fp.config,
             searchTerms: fp.searchTerms ?? [],
@@ -152,11 +154,17 @@ export default defineContentScript({
             previousIterations: fp.previousIterations ?? [],
           })
             .then((result) => {
+              if (result.guardBlocked) {
+                swLog('[content] EXECUTE_FLOW was duplicate (flowRunning guard) — suppressing FLOW_COMPLETE, original flow still running | taskId:', fp.taskId);
+                return;
+              }
+              swLog('[content] FLOW_COMPLETE sending | taskId:', fp.taskId, '| aborted:', result.aborted, '| iterations:', result.iterations?.length, '| totalTimeMs:', result.totalTimeMs);
               try {
                 browser.runtime.sendMessage({ type: 'FLOW_COMPLETE', payload: { result, taskId: fp.taskId } });
               } catch { /* expected */ }
             })
             .catch((err: Error) => {
+              swLog('[content] FLOW_ERROR sending | taskId:', fp.taskId, '| error:', err.message);
               try {
                 browser.runtime.sendMessage({ type: 'FLOW_ERROR', payload: { error: err.message, taskId: fp.taskId } });
               } catch { /* expected */ }
@@ -242,7 +250,10 @@ export default defineContentScript({
                 sendProgress('Looking for tables...');
                 const tableEls = new Set<Element>();
                 for (const el of document.querySelectorAll(TABLE_FRAMEWORK_SELECTORS)) {
-                  if (detectElementType(el as HTMLElement) === 'table') tableEls.add(el);
+                  let kind: string | null = null;
+                  try { kind = detectElementType(el as HTMLElement); }
+                  catch (e) { console.warn('[SCAN] detectElementType threw on candidate', (el as HTMLElement).tagName, e); }
+                  if (kind === 'table') tableEls.add(el);
                 }
                 deduplicateNested(tableEls);
 
@@ -252,19 +263,40 @@ export default defineContentScript({
                   if (scanAbortSignal) { sendAborted(); return; }
                   i++;
                   sendProgress(`Analyzing table ${i} of ${total}...`);
+
+                  const htmlEl = el as HTMLElement;
+                  const idTag = `<${htmlEl.tagName.toLowerCase()} class="${(htmlEl.className || '').toString().slice(0, 80)}">`;
+
+                  let descriptor;
                   try {
-                    const descriptor = generateSelectorDescriptor(el);
-                    results.push({
-                      descriptor,
-                      elementType: 'table',
-                      label: getElementLabel(el as HTMLElement),
-                      extra: {
-                        columnNames: getTableColumnNames(el as HTMLElement) || [],
-                        preview: getTablePreview(el as HTMLElement, 3) || [],
-                        paginationDetected: detectPagination(el as HTMLElement),
-                      },
-                    });
-                  } catch { /* expected */ }
+                    descriptor = generateSelectorDescriptor(el);
+                  } catch (e) {
+                    console.warn('[SCAN] generateSelectorDescriptor threw — dropping table', idTag, e);
+                    continue;
+                  }
+
+                  let columnNames: string[] = [];
+                  try { columnNames = getTableColumnNames(htmlEl) || []; }
+                  catch (e) { console.warn('[SCAN] getTableColumnNames threw', idTag, e); }
+
+                  let preview: Record<string, unknown>[] = [];
+                  try { preview = getTablePreview(htmlEl, 3) || []; }
+                  catch (e) { console.warn('[SCAN] getTablePreview threw', idTag, e); }
+
+                  let paginationDetected = null;
+                  try { paginationDetected = detectPagination(htmlEl); }
+                  catch (e) { console.warn('[SCAN] detectPagination threw', idTag, e); }
+
+                  let label = 'Table';
+                  try { label = getElementLabel(htmlEl); }
+                  catch (e) { console.warn('[SCAN] getElementLabel threw', idTag, e); }
+
+                  results.push({
+                    descriptor,
+                    elementType: 'table',
+                    label,
+                    extra: { columnNames, preview, paginationDetected },
+                  });
                 }
               } else if (scanType === 'chart') {
                 sendProgress('Looking for charts...');
@@ -291,16 +323,32 @@ export default defineContentScript({
                   if (scanAbortSignal) { sendAborted(); return; }
                   i++;
                   sendProgress(`Analyzing chart ${i} of ${total}...`);
+
+                  const htmlEl = el as HTMLElement;
+                  const idTag = `<${htmlEl.tagName.toLowerCase()} class="${(htmlEl.className || '').toString().slice(0, 80)}">`;
+
+                  let descriptor;
                   try {
-                    const descriptor = generateSelectorDescriptor(el);
-                    const chartMethod = await detectChartExtractionMethod(el as HTMLElement);
-                    results.push({
-                      descriptor,
-                      elementType: 'chart',
-                      label: getElementLabel(el as HTMLElement),
-                      extra: { chartMethod },
-                    });
-                  } catch { /* expected */ }
+                    descriptor = generateSelectorDescriptor(el);
+                  } catch (e) {
+                    console.warn('[SCAN] generateSelectorDescriptor threw — dropping chart', idTag, e);
+                    continue;
+                  }
+
+                  let chartMethod;
+                  try { chartMethod = await detectChartExtractionMethod(htmlEl); }
+                  catch (e) { console.warn('[SCAN] detectChartExtractionMethod threw', idTag, e); }
+
+                  let label = 'Chart';
+                  try { label = getElementLabel(htmlEl); }
+                  catch (e) { console.warn('[SCAN] getElementLabel threw', idTag, e); }
+
+                  results.push({
+                    descriptor,
+                    elementType: 'chart',
+                    label,
+                    extra: { chartMethod },
+                  });
                 }
               }
 
@@ -309,7 +357,7 @@ export default defineContentScript({
                   type: 'SCAN_COMPLETE',
                   payload: { elements: results, scanType, found: results.length },
                 });
-              } catch { /* expected */ }
+              } catch (e) { console.warn('[SCAN] SCAN_COMPLETE sendMessage threw', e); }
             } catch (err) {
               try {
                 browser.runtime.sendMessage({

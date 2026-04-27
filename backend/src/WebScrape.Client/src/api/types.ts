@@ -40,19 +40,32 @@ export type ScraperConfigDto = {
   schemaVersion: number;
   createdAt: string;
   updatedAt: string;
+  shared: boolean;
+  lastSyncedAt: string | null;
+  originClientId: string | null;
+  originWorkerName: string | null;
 };
 
 export type CreateScraperConfigDto = {
+  suggestedId?: string;
   name: string;
   domain: string;
   configJson: unknown;
   schemaVersion: number;
+  shared?: boolean;
 };
 
 export type DeleteConfigConflictDto = {
   code: 'CONFIG_REFERENCED';
   referencingTaskCount: number;
   error: string;
+};
+
+export type ScraperConfigSubscriberDto = {
+  id: string;
+  name: string;
+  online: boolean;
+  lastPulledAt: string;
 };
 
 export const BlockType = {
@@ -119,6 +132,7 @@ export type WorkerDto = {
   name: string;
   online: boolean;
   lastSeenAt: string | null;
+  lastConnectedAt: string | null;
   extensionVersion: string | null;
 };
 

@@ -3,3 +3,6 @@ node_modules/
 .wxt/
 *.local
 .env
+
+# Production env file (template lives in backend/.env.prod.example)
+backend/.env.prod

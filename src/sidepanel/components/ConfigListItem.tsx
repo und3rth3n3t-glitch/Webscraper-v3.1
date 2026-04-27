@@ -1,8 +1,12 @@
 import { useState } from 'react';
-import { Copy, Pencil, Trash2, List, Calendar, Play } from 'lucide-react';
+import { Copy, Pencil, Trash2, List, Calendar, Play, Wifi, WifiOff } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
+import ConfigSyncStatus from './ConfigSyncStatus';
+import ConfigConflictDiffModal from './ConfigConflictDiffModal';
 import { useUiStore } from '../stores/uiStore';
-import { deleteConfig } from '../utils/storage';
+import { useSettingsStore } from '../stores/settingsStore';
+import { useSyncStore } from '../stores/syncStore';
+import { deleteConfig, saveConfig } from '../utils/storage';
 import type { ScraperConfig } from '../../types/config';
 
 interface Props {
@@ -11,11 +15,21 @@ interface Props {
   onRun: () => void;
   onDuplicate: () => void;
   onDeleted: (id: string) => void;
+  onUpdated: () => void;
 }
 
-export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onDeleted }: Props) {
+export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onDeleted, onUpdated }: Props) {
   const { showToast } = useUiStore();
   const [confirming, setConfirming] = useState(false);
+  const [conflictOpen, setConflictOpen] = useState(false);
+
+  const conflicts = useSyncStore((s) => s.conflicts);
+  const pushIfDirty = useSyncStore((s) => s.pushIfDirty);
+  const pushingIds = useSyncStore((s) => s.pushingIds);
+  const { serverUrl, jwtToken, connectionStatus } = useSettingsStore();
+
+  const inConflict = !!conflicts[config.id];
+  const isPushing = pushingIds.has(config.id);
 
   const stepCount = config.steps?.length || 0;
   const date = config.updatedAt
@@ -31,6 +45,20 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
       showToast('Failed to delete config.', 'error');
     }
     setConfirming(false);
+  };
+
+  const handleToggleShare = async () => {
+    const nowShared = !config.shared;
+    const updated = { ...config, shared: nowShared, dirty: nowShared ? true : false };
+    await saveConfig(updated);
+    onUpdated();
+    if (nowShared && connectionStatus === 'connected') {
+      await pushIfDirty(serverUrl, jwtToken, config.id);
+    } else if (nowShared) {
+      showToast('Sync turned on. Will push when you reconnect.', 'success');
+    } else {
+      showToast('Sync turned off. The backend keeps its copy.', 'success');
+    }
   };
 
   return (
@@ -56,6 +84,23 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
               <Pencil size={14} />
             </button>
             <button
+              className={`btn btn-icon ${config.shared ? 'btn-icon-edit' : 'btn-icon-subtle'}`}
+              onClick={inConflict ? () => setConflictOpen(true) : handleToggleShare}
+              disabled={isPushing}
+              title={
+                isPushing
+                  ? 'Syncing…'
+                  : inConflict
+                  ? 'Server has newer changes — click to resolve'
+                  : config.shared
+                  ? 'Stop syncing (your backend keeps a copy)'
+                  : 'Sync this config with your backend'
+              }
+              aria-label={config.shared ? 'Stop syncing' : 'Sync config'}
+            >
+              {config.shared ? <Wifi size={14} /> : <WifiOff size={14} />}
+            </button>
+            <button
               className="btn btn-icon btn-icon-delete"
               onClick={() => setConfirming(true)}
               title="Delete"
@@ -74,6 +119,12 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
                 : <span className="meta-badge">{config.domain}</span>
               }
             </div>
+          </div>
+        )}
+
+        {config.shared && (
+          <div className="config-card-body" style={{ paddingTop: 0 }}>
+            <ConfigSyncStatus config={config} />
           </div>
         )}
 
@@ -104,6 +155,13 @@ export default function ConfigListItem({ config, onEdit, onRun, onDuplicate, onD
           confirmVariant="danger"
           onConfirm={handleDelete}
           onCancel={() => setConfirming(false)}
+        />
+      )}
+
+      {conflictOpen && (
+        <ConfigConflictDiffModal
+          configId={config.id}
+          onClose={() => setConflictOpen(false)}
         />
       )}
     </>

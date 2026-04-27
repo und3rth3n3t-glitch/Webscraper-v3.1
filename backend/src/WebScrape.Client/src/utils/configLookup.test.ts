@@ -22,6 +22,10 @@ const fakeConfig: ScraperConfigDto = {
   schemaVersion: 3,
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
+  shared: false,
+  lastSyncedAt: null,
+  originClientId: null,
+  originWorkerName: null,
 };
 
 describe('configNameFor', () => {

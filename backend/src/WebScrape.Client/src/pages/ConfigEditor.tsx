@@ -3,10 +3,10 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import CodeMirror from '@uiw/react-codemirror';
 import { json as cmJson } from '@codemirror/lang-json';
-import { useScraperConfig } from '../api/queries';
+import { useScraperConfig, useScraperConfigSubscribers } from '../api/queries';
 import { useCreateScraperConfig, useDeleteScraperConfig, useUpdateScraperConfig } from '../api/mutations';
 import Modal from '../components/Modal';
-import type { CreateScraperConfigDto, DeleteConfigConflictDto } from '../api/types';
+import type { CreateScraperConfigDto, DeleteConfigConflictDto, ScraperConfigSubscriberDto } from '../api/types';
 import { axiosErrorMessage } from '../utils/errorMessages';
 
 const DEFAULT_CONFIG_JSON = JSON.stringify(
@@ -41,6 +41,8 @@ export default function ConfigEditor() {
   const nav = useNavigate();
 
   const { data: existing, isPending: loadingExisting } = useScraperConfig(id);
+  const { data: subscribers } = useScraperConfigSubscribers(id);
+  const onlineSubscribers = (subscribers ?? []).filter((s: ScraperConfigSubscriberDto) => s.online);
   const create = useCreateScraperConfig();
   const update = useUpdateScraperConfig();
   const remove = useDeleteScraperConfig();
@@ -52,6 +54,7 @@ export default function ConfigEditor() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [shared, setShared] = useState(false);
 
   useEffect(() => {
     if (!isEdit || !existing || hydrated) return;
@@ -59,6 +62,7 @@ export default function ConfigEditor() {
     setDomain(existing.domain);
     setSchemaVersion(existing.schemaVersion);
     setJsonText(JSON.stringify(existing.configJson, null, 2));
+    setShared(existing.shared);
     setHydrated(true);
   }, [isEdit, existing, hydrated]);
 
@@ -78,6 +82,7 @@ export default function ConfigEditor() {
       domain: domain.trim(),
       configJson: parseResult.value,
       schemaVersion,
+      shared,
     };
     if (isEdit && id) {
       await update.mutateAsync({ id, body });
@@ -131,8 +136,26 @@ export default function ConfigEditor() {
 
       {saveError && <div className="danger-banner">{saveError}</div>}
 
+      {onlineSubscribers.length > 0 && (
+        <div className="run-banner-warning">
+          This config is being synced to {onlineSubscribers.length} online extension{onlineSubscribers.length === 1 ? '' : 's'}{' '}
+          ({onlineSubscribers.map((s: ScraperConfigSubscriberDto) => s.name).join(', ')}). Saving here updates everyone.
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: 'var(--spacing-lg)', alignItems: 'start' }}>
         <div>
+          <div className="form-group">
+            <label className="form-check">
+              <input
+                type="checkbox"
+                checked={shared}
+                onChange={(e) => setShared(e.target.checked)}
+              />
+              Share with my extensions
+            </label>
+            <div className="form-hint">When on, your connected extensions can pull this config and stay in sync with edits made here.</div>
+          </div>
           <div className="form-group">
             <label className="form-label" htmlFor="config-name">Name</label>
             <input

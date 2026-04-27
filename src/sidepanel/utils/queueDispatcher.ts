@@ -1,7 +1,8 @@
 import { useQueueStore } from '../stores/queueStore';
 import { useUiStore } from '../stores/uiStore';
 import { onMessage } from './messageDispatcher';
-import type { QueueTask, TaskResult } from '../../types/signalr';
+import { mergeProgress } from '../../utils/queueProgress';
+import type { QueueTask, TaskResult, QueueSnapshot } from '../../types/signalr';
 import type { ScrapingResult } from '../../types/extraction';
 
 // Wires queue-mode messages (TASK_RECEIVED + FLOW_*) into the queue store.
@@ -19,12 +20,23 @@ export function startQueueDispatcher(): () => void {
   };
   chrome.runtime.onMessage.addListener(rawListener);
 
+  browser.runtime.sendMessage({ type: 'GET_QUEUE_SNAPSHOT' })
+    .then((resp: unknown) => {
+      const snapshot = resp as QueueSnapshot | null;
+      if (snapshot) useQueueStore.getState().seedFromSnapshot(snapshot);
+    })
+    .catch(() => { /* SW may not be running yet — no-op */ });
+
   // FLOW_* events come from content scripts (sender.tab set) and the
   // dispatcher routes them. Skip events without a taskId — those are local runs.
   const offProgress = onMessage('FLOW_PROGRESS', (payload) => {
-    const p = payload as { taskId?: string };
+    const p = payload as { taskId?: string; stepLabel?: unknown; termIndex?: unknown };
     if (!p.taskId) return;
-    useQueueStore.getState().updateTaskStatus(p.taskId, 'running');
+    const store = useQueueStore.getState();
+    store.updateTaskStatus(p.taskId, 'running');
+    const prior = store.tasks.find((t) => t.id === p.taskId)?.progress ?? null;
+    const merged = mergeProgress(prior, { stepLabel: p.stepLabel, termIndex: p.termIndex });
+    if (merged) store.setTaskProgress(p.taskId, merged);
   });
 
   const offComplete = onMessage('FLOW_COMPLETE', (payload) => {

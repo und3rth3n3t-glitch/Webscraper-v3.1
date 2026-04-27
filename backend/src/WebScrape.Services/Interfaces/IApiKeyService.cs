@@ -7,4 +7,5 @@ public interface IApiKeyService
     Task<CreateApiKeyResponseDto> CreateAsync(Guid userId, string name, CancellationToken ct = default);
     Task<List<ApiKeyDto>> ListAsync(Guid userId, CancellationToken ct = default);
     Task<bool> RevokeAsync(Guid userId, Guid id, CancellationToken ct = default);
+    Task<ApiKeyDto?> RenameAsync(Guid userId, Guid id, string newName, CancellationToken ct = default);
 }

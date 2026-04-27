@@ -1,6 +1,5 @@
 import { useQueueStore } from '../stores/queueStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import { useRunStore } from '../stores/runStore';
 import { sendToContent } from '../utils/messaging';
 import type { QueueTask } from '../../types/signalr';
 
@@ -14,10 +13,20 @@ function statusDot(status: QueueTask['status']): string {
   }
 }
 
+function stepLine(task: QueueTask): string {
+  if (!task.progress) return '';
+  const { stepLabel, termIndex } = task.progress;
+  const total = task.searchTerms.length;
+  const showTermPrefix = total > 1 && !task.iterationLabel && termIndex !== undefined;
+  if (!showTermPrefix) return stepLabel;
+  const display = Math.min(termIndex + 1, total);
+  const prefix = `Term ${display} of ${total}`;
+  return stepLabel ? `${prefix} · ${stepLabel}` : prefix;
+}
+
 export default function QueueView() {
   const { tasks, currentTaskId, stats, clearCompleted, clearPending, removeTask, resumeTask } = useQueueStore();
   const { connected, serverUrl, lastConnectionError } = useSettingsStore();
-  const { isRunning } = useRunStore();
 
   const currentTask = tasks.find(t => t.id === currentTaskId);
   const pendingTasks = tasks.filter(t => t.status === 'pending');
@@ -72,8 +81,10 @@ export default function QueueView() {
             <p className="text-sm text-light">
               {taskLabel(currentTask) ?? 'Batch task'}
               {currentTask.status === 'paused' && ' — waiting for Cloudflare challenge'}
-              {isRunning && currentTask.status === 'running' && ' — running...'}
             </p>
+            {currentTask.status === 'running' && stepLine(currentTask) && (
+              <span className="run-term-step">{stepLine(currentTask)}</span>
+            )}
           </div>
         </div>
       )}

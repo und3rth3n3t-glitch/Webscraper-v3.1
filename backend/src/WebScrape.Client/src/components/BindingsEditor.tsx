@@ -1,20 +1,41 @@
 import type { StepBindingDto } from '../api/types';
+import type { LoopAncestor } from '../utils/taskTree';
 
 type SetInputStep = { id: string; type: 'setInput'; [key: string]: unknown };
 
 type Props = {
   steps: SetInputStep[];
-  loopBlockId: string;
-  loopName: string;
+  loopAncestors: LoopAncestor[];
   stepBindings: Record<string, StepBindingDto>;
   onChange: (bindings: Record<string, StepBindingDto>) => void;
 };
 
-export default function BindingsEditor({ steps, loopBlockId, loopName, stepBindings, onChange }: Props) {
+function selectValue(binding: StepBindingDto): string {
+  if (binding.kind === 'loopRef') return `loopRef:${binding.loopBlockId}`;
+  return binding.kind;
+}
+
+function bindingFromSelect(value: string): StepBindingDto {
+  if (value.startsWith('loopRef:')) {
+    return { kind: 'loopRef', loopBlockId: value.slice('loopRef:'.length) };
+  }
+  if (value === 'literal') return { kind: 'literal', value: '' };
+  return { kind: 'unbound' };
+}
+
+export default function BindingsEditor({ steps, loopAncestors, stepBindings, onChange }: Props) {
   if (steps.length === 0) {
     return (
       <div className="form-hint">
         This config has no inputs. Loop values will run the scrape, but won't be substituted.
+      </div>
+    );
+  }
+
+  if (loopAncestors.length === 0) {
+    return (
+      <div className="form-hint">
+        This scrape has no parent loops. Add a loop ancestor to bind values.
       </div>
     );
   }
@@ -37,15 +58,14 @@ export default function BindingsEditor({ steps, loopBlockId, loopName, stepBindi
             <label className="form-label">{step.id}</label>
             <select
               className="form-select"
-              value={binding.kind}
-              onChange={(e) => {
-                const kind = e.target.value as 'loopRef' | 'literal' | 'unbound';
-                if (kind === 'loopRef') update(step.id, { kind: 'loopRef', loopBlockId });
-                else if (kind === 'literal') update(step.id, { kind: 'literal', value: '' });
-                else update(step.id, { kind: 'unbound' });
-              }}
+              value={selectValue(binding)}
+              onChange={(e) => update(step.id, bindingFromSelect(e.target.value))}
             >
-              <option value="loopRef">Loop value ({loopName}.currentItem)</option>
+              {loopAncestors.map((a) => (
+                <option key={a.id} value={`loopRef:${a.id}`}>
+                  Loop value ({a.name}.currentItem)
+                </option>
+              ))}
               <option value="literal">Literal value</option>
               <option value="unbound">Unbound</option>
             </select>

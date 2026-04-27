@@ -1,4 +1,5 @@
 import type { SelectorDescriptor } from '../../types/config';
+import { naturalClick } from '../scraping/humanBehavior';
 
 function debugLog(context: string, error: unknown): void {
   console.debug(`[Blueberry] ${context}:`, error instanceof Error ? error.message : error);
@@ -460,9 +461,12 @@ export function waitForContentChange(
   });
 }
 
+const MAX_EXPAND_CLICKS = 100; // safety cap on hostile pages with hundreds of [aria-expanded="false"]
+
 export async function expandHiddenElements(opts: {
   isAborted?: () => boolean;
   onProgress?: (msg: string) => void;
+  delayMs?: number;
 } = {}): Promise<void> {
   const patterns = [
     '[aria-expanded="false"]',
@@ -470,27 +474,44 @@ export async function expandHiddenElements(opts: {
     'button[class*="show-more" i]',
     'button[class*="load-more" i]',
     'a[class*="show-more" i]',
-    '[data-toggle="collapse"]',
-    '.accordion-toggle',
-    '.expand-btn',
+    '[data-toggle="collapse"].collapsed',   // Bootstrap: .collapsed = currently collapsed
+    '.accordion-toggle[aria-expanded="false"]',
+    '.expand-btn[aria-expanded="false"]',
   ];
 
+  // Skip elements that look already-expanded (catches non-ARIA patterns and
+  // any cases where the selector is too broad).
+  const isLikelyExpanded = (el: HTMLElement): boolean => {
+    if (el.getAttribute('aria-expanded') === 'true') return true;
+    const cls = el.className?.toString().toLowerCase() ?? '';
+    return /\bopen\b|\bexpanded\b/.test(cls);
+  };
+
+  const baseDelay = opts.delayMs ?? 350;
   const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   let totalClicked = 0;
   for (const pattern of patterns) {
     if (opts.isAborted?.()) return;
+    if (totalClicked >= MAX_EXPAND_CLICKS) {
+      opts.onProgress?.(`Expand cap reached (${MAX_EXPAND_CLICKS}) — moving on`);
+      return;
+    }
     const elements = document.querySelectorAll(pattern);
     for (const el of elements) {
       if (opts.isAborted?.()) return;
+      if (totalClicked >= MAX_EXPAND_CLICKS) return;
       if ((el as HTMLElement).offsetParent === null) continue;
+      if (isLikelyExpanded(el as HTMLElement)) continue;
       try {
-        (el as HTMLElement).click();
+        // naturalClick runs the Fitts curve regardless of cursor visibility — afk:false
+        // keeps the anti-ban benefit even when the operator hasn't enabled the cosmetic cursor.
+        await naturalClick(el as HTMLElement, { afk: false });
         totalClicked++;
         if (totalClicked % 5 === 0) {
           opts.onProgress?.(`Expanding hidden sections... (${totalClicked} so far)`);
         }
-        await delay(200 + Math.random() * 300);
+        await delay(baseDelay * (0.7 + Math.random() * 0.6)); // ±30 % jitter
       } catch { /* expected */ }
     }
   }

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useApiKeys } from '../api/queries';
-import { useCreateApiKey, useRevokeApiKey } from '../api/mutations';
+import { useCreateApiKey, useRenameApiKey, useRevokeApiKey } from '../api/mutations';
 import Modal from '../components/Modal';
 import type { CreateApiKeyResponseDto } from '../api/types';
 import { axiosErrorMessage } from '../utils/errorMessages';
@@ -10,11 +10,14 @@ export default function ApiKeys() {
   const { data: keys, isPending } = useApiKeys();
   const create = useCreateApiKey();
   const revoke = useRevokeApiKey();
+  const rename = useRenameApiKey();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<CreateApiKeyResponseDto | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<{ id: string; name: string } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
 
   const createErrMsg = create.error ? axiosErrorMessage(create.error, 'Failed to create key.') : null;
 
@@ -30,6 +33,24 @@ export default function ApiKeys() {
     if (!confirmRevoke) return;
     await revoke.mutateAsync(confirmRevoke.id);
     setConfirmRevoke(null);
+  };
+
+  const startEdit = (id: string, currentName: string) => {
+    setEditingId(id);
+    setEditName(currentName);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditName('');
+  };
+
+  const submitRename = async () => {
+    if (!editingId) return;
+    const trimmed = editName.trim();
+    if (!trimmed) { cancelEdit(); return; }
+    await rename.mutateAsync({ id: editingId, name: trimmed });
+    cancelEdit();
   };
 
   return (
@@ -67,7 +88,50 @@ export default function ApiKeys() {
           <tbody>
             {keys.map((k) => (
               <tr key={k.id}>
-                <td>{k.name}</td>
+                <td>
+                  {editingId === k.id ? (
+                    <span className="flex" style={{ gap: 'var(--spacing-xs)', alignItems: 'center' }}>
+                      <input
+                        className="form-input"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') submitRename();
+                          if (e.key === 'Escape') cancelEdit();
+                        }}
+                        autoFocus
+                        disabled={rename.isPending}
+                      />
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={submitRename}
+                        disabled={rename.isPending || !editName.trim()}
+                      >
+                        Save
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={cancelEdit}
+                        disabled={rename.isPending}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="flex" style={{ gap: 'var(--spacing-xs)', alignItems: 'center' }}>
+                      {k.name}
+                      {!k.revokedAt && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => startEdit(k.id, k.name)}
+                          title="Rename — only changes the label here. Workers using this key keep their own name."
+                        >
+                          Edit
+                        </button>
+                      )}
+                    </span>
+                  )}
+                </td>
                 <td>
                   <code>{k.prefix}…</code>
                 </td>

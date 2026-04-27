@@ -10,6 +10,7 @@ public enum RunBatchOutcome
     WorkerOffline,
     BatchEmpty,
     BatchTooLarge,
+    NestedLoopUnsupported,
 }
 
 public record RunBatchDispatchResult(

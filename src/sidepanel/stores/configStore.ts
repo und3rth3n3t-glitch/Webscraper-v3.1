@@ -204,12 +204,31 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       url: pageUrl,
       steps,
       dataMapping: currentConfig?.dataMapping,
-      schemaVersion: CURRENT_SCHEMA_VERSION as 3,
+      schemaVersion: CURRENT_SCHEMA_VERSION as 4,
       createdAt: currentConfig?.createdAt || Date.now(),
       updatedAt: Date.now(),
+      shared: currentConfig?.shared ?? false,
+      lastSyncedAt: currentConfig?.lastSyncedAt ?? null,
     };
+
+    if (config.shared) {
+      config.dirty = true;
+    }
+
     await saveConfigToStorage(config);
     set({ currentConfig: config, isDirty: false });
+
+    // Auto-push when shared + connected. Fire-and-forget; pushIfDirty handles its
+    // own errors and dirty flag. Imported lazily to avoid a circular dependency.
+    if (config.shared) {
+      const { useSettingsStore } = await import('./settingsStore');
+      const { useSyncStore } = await import('./syncStore');
+      const { serverUrl, jwtToken, connectionStatus } = useSettingsStore.getState();
+      if (connectionStatus === 'connected') {
+        void useSyncStore.getState().pushIfDirty(serverUrl, jwtToken, config.id);
+      }
+    }
+
     return config;
   },
 

@@ -58,6 +58,9 @@ export default function ScrapeElementsForm({ editingStepId }: Props) {
   const updateElements = (newElements: ElementConfig[]) =>
     updateStepOptions(step.id, { elements: newElements as unknown as ScrapeElementConfig[] } as Partial<ScrapeOptions>);
 
+  const updateOpt = (key: keyof ScrapeOptions, value: unknown) =>
+    updateStepOptions(step.id, { [key]: value } as Partial<ScrapeOptions>);
+
   const addElement = async (mode = 'single') => {
     try {
       await sendToContent('START_PICKER', { mode });
@@ -121,8 +124,12 @@ export default function ScrapeElementsForm({ editingStepId }: Props) {
     try {
       setScanning(true);
       setScanProgress('Starting scan...');
+      // Subscribe to SCAN_COMPLETE before kicking off the scan, otherwise a fast scan
+      // (or a slow sendToContent round-trip) can deliver SCAN_COMPLETE before the
+      // collector subscribes, and we lose the result.
+      const framesPromise = collectFrameResponses('SCAN_COMPLETE', { errorType: 'SCAN_ERROR' }) as Promise<Array<{ elements?: unknown[]; scanType?: string; aborted?: boolean }>>;
       await sendToContent('SCAN_ELEMENTS', { scanType: scanMode, expand: expandHidden });
-      const frames = await collectFrameResponses('SCAN_COMPLETE', { errorType: 'SCAN_ERROR' }) as Array<{ elements?: unknown[]; scanType?: string; aborted?: boolean }>;
+      const frames = await framesPromise;
       const foundElements = frames.flatMap(f => f.elements || []) as Array<Record<string, unknown>>;
       const resolvedScanType = frames[0]?.scanType || scanMode;
       const wasAborted = frames.some(f => f.aborted);
@@ -330,6 +337,53 @@ export default function ScrapeElementsForm({ editingStepId }: Props) {
           </button>
         </div>
       )}
+
+      <details className="form-group">
+        <summary className="form-label" style={{ cursor: 'pointer' }}>Human pacing (advanced)</summary>
+        <p className="form-hint">All values in milliseconds (or fraction of viewport for scroll step). Leave blank for sensible defaults.</p>
+
+        <label className="form-label mt-8">Scroll step size (× viewport)</label>
+        <input
+          type="number"
+          step="0.05"
+          min="0.1"
+          max="1.0"
+          className="form-input"
+          value={opts.scrollIncrementVh ?? ''}
+          placeholder="0.4"
+          onChange={(e) => updateOpt('scrollIncrementVh', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between scroll steps (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.scrollDelayMs ?? ''}
+          placeholder="700"
+          onChange={(e) => updateOpt('scrollDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between pagination clicks (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.paginationDelayMs ?? ''}
+          placeholder="1500"
+          onChange={(e) => updateOpt('paginationDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between expand-button clicks (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.expandDelayMs ?? ''}
+          placeholder="350"
+          onChange={(e) => updateOpt('expandDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+      </details>
 
       <StepConditionEditor stepId={step.id} />
 

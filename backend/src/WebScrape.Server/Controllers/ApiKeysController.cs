@@ -42,4 +42,14 @@ public class ApiKeysController : ControllerBase
         if (!ok) return NotFound();
         return NoContent();
     }
+
+    [HttpPatch("{id:guid}")]
+    [CookieCsrf]
+    public async Task<IActionResult> Rename(Guid id, [FromBody] RenameApiKeyDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto?.Name)) return BadRequest(new { error = "Name is required" });
+        var updated = await _apiKeys.RenameAsync(User.GetUserId(), id, dto.Name, ct);
+        if (updated is null) return NotFound();
+        return Ok(updated);
+    }
 }

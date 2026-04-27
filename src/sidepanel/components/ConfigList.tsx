@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen } from 'lucide-react';
+import { FolderOpen, RefreshCw } from 'lucide-react';
 import ConfigListItem from './ConfigListItem';
 import EmptyState from './EmptyState';
 import { useConfigStore } from '../stores/configStore';
 import { useUiStore } from '../stores/uiStore';
+import { useSettingsStore } from '../stores/settingsStore';
+import { useSyncStore } from '../stores/syncStore';
 import { getAllConfigs, saveConfig } from '../utils/storage';
 import { generateId } from '../utils/uuid';
 import { useRunStore } from '../stores/runStore';
@@ -12,6 +14,11 @@ import type { ScraperConfig } from '../../types/config';
 export default function ConfigList() {
   const { loadConfig, pageDomain } = useConfigStore();
   const { showToast, setActiveTab } = useUiStore();
+  const { serverUrl, jwtToken, connectionStatus } = useSettingsStore();
+  const syncing = useSyncStore((s) => s.syncing);
+  const version = useSyncStore((s) => s.version);
+  const pullSharedConfigs = useSyncStore((s) => s.pullSharedConfigs);
+
   const [configs, setConfigs] = useState<ScraperConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -27,9 +34,10 @@ export default function ConfigList() {
     }
   }, [showToast]);
 
+  // Re-fetch on mount AND whenever syncStore.version bumps (push/pull/conflict resolve).
   useEffect(() => {
     loadConfigs();
-  }, [loadConfigs]);
+  }, [loadConfigs, version]);
 
   const handleEdit = (config: ScraperConfig) => {
     loadConfig(config);
@@ -43,12 +51,16 @@ export default function ConfigList() {
 
   const handleDuplicate = async (config: ScraperConfig) => {
     const now = Date.now();
+    // Reset sync metadata: a duplicate is a brand-new local config, not a synced one.
     const copy: ScraperConfig = {
       ...config,
       id: generateId(),
       name: `${config.name} (copy)`,
       createdAt: now,
       updatedAt: now,
+      shared: false,
+      lastSyncedAt: null,
+      dirty: false,
     };
     try {
       await saveConfig(copy);
@@ -65,6 +77,14 @@ export default function ConfigList() {
     if (currentConfig?.id === id) {
       newConfig();
     }
+  };
+
+  const handlePull = () => {
+    if (connectionStatus !== 'connected') {
+      showToast('Not connected to backend.', 'error');
+      return;
+    }
+    void pullSharedConfigs(serverUrl, jwtToken);
   };
 
   if (loading) {
@@ -93,8 +113,17 @@ export default function ConfigList() {
 
   return (
     <div className="view">
-      <div className="view-header-row">
+      <div className="view-header-row" style={{ justifyContent: 'space-between' }}>
         <h2 className="view-title">Saved Configs</h2>
+        <button
+          className="btn btn-icon btn-icon-subtle"
+          onClick={handlePull}
+          disabled={syncing || connectionStatus !== 'connected'}
+          title="Pull latest from server"
+          aria-label="Pull latest from server"
+        >
+          <RefreshCw size={14} />
+        </button>
       </div>
       <div className="radio-pill-group">
         <label className={`radio-pill ${!showAll ? 'radio-pill-active' : ''}`}>
@@ -128,6 +157,7 @@ export default function ConfigList() {
               onRun={() => handleRun(config)}
               onDuplicate={() => handleDuplicate(config)}
               onDeleted={handleDeleted}
+              onUpdated={loadConfigs}
             />
           ))
         )}

@@ -1,8 +1,23 @@
 import { useWorkers } from '../api/queries';
 import { fmtRelative } from '../utils/formatDate';
+import type { WorkerDto } from '../api/types';
+
+const STALE_MS = 30_000;
+
+function presence(w: WorkerDto, now: number): { dot: 'success' | 'warning' | 'pending'; label: string } {
+  if (!w.online) return { dot: 'pending', label: 'Offline' };
+  if (!w.lastSeenAt) return { dot: 'success', label: 'Online' };
+  const ageMs = now - new Date(w.lastSeenAt).getTime();
+  if (ageMs > STALE_MS) {
+    const s = Math.round(ageMs / 1000);
+    return { dot: 'warning', label: `Idle (${s}s since last activity)` };
+  }
+  return { dot: 'success', label: 'Online' };
+}
 
 export default function Workers() {
   const { data: workers, isPending } = useWorkers();
+  const now = Date.now();
 
   return (
     <div className="view">
@@ -31,19 +46,22 @@ export default function Workers() {
             </tr>
           </thead>
           <tbody>
-            {workers.map((w) => (
-              <tr key={w.id}>
-                <td>{w.name}</td>
-                <td>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <span className={`status-dot ${w.online ? 'success' : 'pending'}`} />
-                    {w.online ? 'Online' : 'Offline'}
-                  </span>
-                </td>
-                <td>{w.extensionVersion ?? '—'}</td>
-                <td>{fmtRelative(w.lastSeenAt)}</td>
-              </tr>
-            ))}
+            {workers.map((w) => {
+              const p = presence(w, now);
+              return (
+                <tr key={w.id}>
+                  <td>{w.name}</td>
+                  <td>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className={`status-dot ${p.dot}`} />
+                      {p.label}
+                    </span>
+                  </td>
+                  <td>{w.extensionVersion ?? '—'}</td>
+                  <td>{fmtRelative(w.lastSeenAt)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

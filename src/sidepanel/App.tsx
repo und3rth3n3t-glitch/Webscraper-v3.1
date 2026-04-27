@@ -15,13 +15,49 @@ import AwaitActionPauseAlert from './components/AwaitActionPauseAlert';
 import { useUiStore } from './stores/uiStore';
 import { useConfigStore } from './stores/configStore';
 import { useSettingsStore } from './stores/settingsStore';
+import { useSyncStore } from './stores/syncStore';
 import { getPageInfo } from './utils/messaging';
+import { getApiToken } from './utils/storage';
 import { startDispatcher } from './utils/messageDispatcher';
 import { startQueueDispatcher } from './utils/queueDispatcher';
 import type { ConnectionStatus } from '../types/messages';
 
 export default function App() {
   useEffect(() => { startDispatcher(); }, []);
+
+  useEffect(() => {
+    const { serverUrl, mode, workerName } = useSettingsStore.getState();
+    browser.runtime.sendMessage({ type: 'GET_CONNECTION_STATUS' })
+      .then(async (res: unknown) => {
+        const r = res as { status?: ConnectionStatus };
+        const status = r?.status ?? 'idle';
+        useSettingsStore.getState().setConnectionStatus(status);
+
+        const pauseRes = await browser.runtime.sendMessage({ type: 'GET_PAUSE_STATE' }).catch(() => null);
+        const ps = (pauseRes as { pauseState?: { reason: string; message?: string } } | null)?.pauseState;
+        if (ps?.reason === 'cloudflare') {
+          useUiStore.getState().setCloudflarePaused(true);
+        } else if (ps?.reason === 'awaitUserAction') {
+          useUiStore.getState().setAwaitActionPaused({ message: ps.message ?? 'Action needed in your browser.' });
+        }
+
+        if (status === 'idle' && mode === 'queue' && serverUrl) {
+          const token = await getApiToken().catch(() => null);
+          if (token) {
+            await browser.runtime.sendMessage({
+              type: 'INIT_SIGNALR',
+              payload: {
+                serverUrl,
+                token,
+                clientId: workerName || 'My Browser',
+                version: chrome.runtime.getManifest().version,
+              },
+            });
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     // CONNECTION_STATUS comes from the offscreen document (not a tab), so it must
@@ -31,13 +67,36 @@ export default function App() {
       if (msg.type === 'CONNECTION_STATUS') {
         const payload = msg.payload as { status: ConnectionStatus; error?: string };
         useSettingsStore.getState().setConnectionStatus(payload.status, payload.error);
+        if (payload.status === 'connected') {
+          const { serverUrl, jwtToken } = useSettingsStore.getState();
+          useSyncStore.getState().pullSharedConfigs(serverUrl, jwtToken);
+        }
       }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const { connectionStatus, serverUrl, jwtToken } = useSettingsStore.getState();
+      if (connectionStatus !== 'connected') return;
+      void useSyncStore.getState().pullSharedConfigs(serverUrl, jwtToken);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   useEffect(() => startQueueDispatcher(), []);
+
+  useEffect(() => {
+    return useSyncStore.subscribe((state, prev) => {
+      if (state.lastSyncError && state.lastSyncError !== prev.lastSyncError) {
+        useUiStore.getState().showToast(`Sync failed: ${state.lastSyncError}`, 'error');
+      }
+    });
+  }, []);
 
   const activeTab = useUiStore((s) => s.activeTab);
   const setActiveTab = useUiStore((s) => s.setActiveTab);

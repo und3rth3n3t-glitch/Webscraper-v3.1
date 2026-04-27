@@ -21,6 +21,7 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
     public DbSet<WorkerConnection> WorkerConnections => Set<WorkerConnection>();
     public DbSet<RunItem> RunItems => Set<RunItem>();
     public DbSet<RunBatch> RunBatches => Set<RunBatch>();
+    public DbSet<ScraperConfigSubscription> ScraperConfigSubscriptions => Set<ScraperConfigSubscription>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -51,7 +52,10 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
             e.Property(x => x.Domain).IsRequired();
             e.Property(x => x.ConfigJson).HasColumnType("jsonb").HasConversion(jsonConverter).IsRequired();
             e.Property(x => x.SchemaVersion).HasDefaultValue(3);
+            e.Property(x => x.Shared).HasDefaultValue(false);
             e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasMany(x => x.Subscriptions).WithOne(x => x.Config!).HasForeignKey(x => x.ScraperConfigId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.UserId, x.Shared }).HasDatabaseName("ix_scraper_configs_user_id_shared");
         });
 
         builder.Entity<TaskEntity>(e =>
@@ -103,6 +107,13 @@ public class WebScrapeDbContext : IdentityDbContext<User, IdentityRole<Guid>, Gu
             e.HasIndex(x => new { x.TaskId, x.RequestedAt });
             e.HasIndex(x => x.Status);
             e.HasIndex(x => x.BatchId);
+        });
+
+        builder.Entity<ScraperConfigSubscription>(e =>
+        {
+            e.HasKey(x => new { x.ScraperConfigId, x.WorkerId });
+            e.HasOne(x => x.Config).WithMany(x => x.Subscriptions).HasForeignKey(x => x.ScraperConfigId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.Worker).WithMany().HasForeignKey(x => x.WorkerId).OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

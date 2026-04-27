@@ -9,6 +9,7 @@ public enum ExpansionOutcome
     Forbidden,
     BatchEmpty,
     BatchTooLarge,
+    NestedLoopUnsupported,
 }
 
 public record ExpansionPreview(

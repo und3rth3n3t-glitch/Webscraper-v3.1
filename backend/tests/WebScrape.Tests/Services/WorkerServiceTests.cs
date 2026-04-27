@@ -9,11 +9,18 @@ namespace WebScrape.Tests.Services;
 
 public class WorkerServiceTests
 {
+    private static (WorkerService svc, WebScrape.Data.WebScrapeDbContext db, Microsoft.Extensions.Caching.Memory.IMemoryCache cache) Build()
+    {
+        var db = TestDb.CreateInMemory();
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var svc = new WorkerService(db, TestDb.CreateMapper(), cache);
+        return (svc, db, cache);
+    }
+
     [Fact]
     public async Task Register_inserts_new_row_for_first_connection()
     {
-        var db = TestDb.CreateInMemory();
-        var svc = new WorkerService(db, TestDb.CreateMapper());
+        var (svc, db, _) = Build();
         var userId = Guid.NewGuid();
         var apiKeyId = Guid.NewGuid();
 
@@ -30,8 +37,7 @@ public class WorkerServiceTests
     [Fact]
     public async Task Register_reuses_row_for_same_user_and_api_key()
     {
-        var db = TestDb.CreateInMemory();
-        var svc = new WorkerService(db, TestDb.CreateMapper());
+        var (svc, db, _) = Build();
         var userId = Guid.NewGuid();
         var apiKeyId = Guid.NewGuid();
 
@@ -48,8 +54,7 @@ public class WorkerServiceTests
     [Fact]
     public async Task HandleDisconnect_clears_connection_and_fails_in_flight_runs()
     {
-        var db = TestDb.CreateInMemory();
-        var svc = new WorkerService(db, TestDb.CreateMapper());
+        var (svc, db, _) = Build();
         var userId = Guid.NewGuid();
         var worker = await svc.RegisterAsync(userId, Guid.NewGuid(), "L", "1", "conn-x");
 
@@ -75,9 +80,48 @@ public class WorkerServiceTests
     [Fact]
     public async Task HandleDisconnect_is_noop_for_unknown_connection()
     {
-        var db = TestDb.CreateInMemory();
-        var svc = new WorkerService(db, TestDb.CreateMapper());
+        var (svc, db, _) = Build();
         await svc.HandleDisconnectAsync("never-existed");
+        Assert.Equal(0, await db.WorkerConnections.CountAsync());
+    }
+
+    [Fact]
+    public async Task BumpLastSeen_updates_timestamp_for_connected_worker()
+    {
+        var (svc, db, _) = Build();
+        var worker = await svc.RegisterAsync(Guid.NewGuid(), Guid.NewGuid(), "L", "1", "conn-bump");
+        var initial = worker.LastSeenAt;
+
+        await Task.Delay(10);
+        await svc.BumpLastSeenAsync("conn-bump");
+
+        var reloaded = await db.WorkerConnections.SingleAsync(w => w.Id == worker.Id);
+        Assert.NotNull(reloaded.LastSeenAt);
+        Assert.True(reloaded.LastSeenAt > initial, "LastSeenAt should advance after bump");
+    }
+
+    [Fact]
+    public async Task BumpLastSeen_throttle_skips_within_window()
+    {
+        var (svc, db, _) = Build();
+        var worker = await svc.RegisterAsync(Guid.NewGuid(), Guid.NewGuid(), "L", "1", "conn-throttle");
+
+        await svc.BumpLastSeenAsync("conn-throttle");
+        var firstBump = (await db.WorkerConnections.SingleAsync(w => w.Id == worker.Id)).LastSeenAt;
+
+        // Second bump within throttle window — must be skipped.
+        await Task.Delay(20);
+        await svc.BumpLastSeenAsync("conn-throttle");
+        var secondReload = (await db.WorkerConnections.SingleAsync(w => w.Id == worker.Id)).LastSeenAt;
+
+        Assert.Equal(firstBump, secondReload);
+    }
+
+    [Fact]
+    public async Task BumpLastSeen_is_noop_for_unknown_connection()
+    {
+        var (svc, db, _) = Build();
+        await svc.BumpLastSeenAsync("never-existed");
         Assert.Equal(0, await db.WorkerConnections.CountAsync());
     }
 }

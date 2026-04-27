@@ -65,7 +65,7 @@ public class QueueExpansionServiceTests
     };
 
     [Fact]
-    public async Task Single_loop_three_values_one_scrape_yields_three_results()
+    public async Task Single_loop_three_values_one_scrape_yields_one_result_with_all_terms()
     {
         var loopId = Guid.NewGuid();
         var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
@@ -77,15 +77,29 @@ public class QueueExpansionServiceTests
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
 
         Assert.Equal(ExpansionOutcome.Ok, preview.Outcome);
-        Assert.Equal(3, preview.Count);
-        Assert.Collection(preview.Results,
-            r => Assert.Equal("loop1=a", r.IterationLabel),
-            r => Assert.Equal("loop1=b", r.IterationLabel),
-            r => Assert.Equal("loop1=c", r.IterationLabel));
+        Assert.Equal(1, preview.Count);
+        Assert.Single(preview.Results);
+        Assert.Equal(new[] { "a", "b", "c" }, preview.Results[0].SearchTerms);
     }
 
     [Fact]
-    public async Task Two_nested_loops_one_scrape_yields_cartesian_product()
+    public async Task Single_loop_one_scrape_has_empty_assignments_and_label()
+    {
+        var loopId = Guid.NewGuid();
+        var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
+        {
+            LoopBlock(loopId, tid, null, "loop1", new[] { "a", "b" }),
+            ScrapeBlock(Guid.NewGuid(), tid, loopId, cid),
+        });
+
+        var preview = await BuildService(db).ExpandAsync(userId, taskId);
+
+        Assert.Empty(preview.Results[0].Assignments);
+        Assert.Equal("", preview.Results[0].IterationLabel);
+    }
+
+    [Fact]
+    public async Task Two_nested_loops_returns_NestedLoopUnsupported()
     {
         var loop1 = Guid.NewGuid();
         var loop2 = Guid.NewGuid();
@@ -98,16 +112,11 @@ public class QueueExpansionServiceTests
 
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
 
-        Assert.Equal(4, preview.Count);
-        var labels = preview.Results.Select(r => r.IterationLabel).ToList();
-        Assert.Contains("loop1=a, loop2=x", labels);
-        Assert.Contains("loop1=a, loop2=y", labels);
-        Assert.Contains("loop1=b, loop2=x", labels);
-        Assert.Contains("loop1=b, loop2=y", labels);
+        Assert.Equal(ExpansionOutcome.NestedLoopUnsupported, preview.Outcome);
     }
 
     [Fact]
-    public async Task Loop_with_two_scrape_children_yields_2N_results()
+    public async Task Loop_with_two_scrape_children_yields_two_results()
     {
         var loopId = Guid.NewGuid();
         var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
@@ -118,7 +127,25 @@ public class QueueExpansionServiceTests
         });
 
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
-        Assert.Equal(6, preview.Count);
+        Assert.Equal(2, preview.Count);
+        Assert.All(preview.Results, r => Assert.Equal(new[] { "a", "b", "c" }, r.SearchTerms));
+    }
+
+    [Fact]
+    public async Task Empty_loop_yields_one_result_with_single_empty_search_term()
+    {
+        var loopId = Guid.NewGuid();
+        var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
+        {
+            LoopBlock(loopId, tid, null, "loop1", Array.Empty<string>()),
+            ScrapeBlock(Guid.NewGuid(), tid, loopId, cid),
+        });
+
+        var preview = await BuildService(db).ExpandAsync(userId, taskId);
+
+        Assert.Equal(ExpansionOutcome.Ok, preview.Outcome);
+        Assert.Equal(1, preview.Count);
+        Assert.Equal(new[] { "" }, preview.Results[0].SearchTerms);
     }
 
     [Fact]
@@ -132,18 +159,20 @@ public class QueueExpansionServiceTests
     [Fact]
     public async Task Cap_exceeded_returns_BATCH_TOO_LARGE()
     {
-        var loop1 = Guid.NewGuid();
-        var loop2 = Guid.NewGuid();
-        var loop3 = Guid.NewGuid();
-        var loop4 = Guid.NewGuid();
-        var values = Enumerable.Range(0, 7).Select(i => i.ToString()).ToArray(); // 7^4 = 2401 > 1000
-        var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
+        // Deeply nested loops still hit the cap guard (via sibling top-level loops, not nested).
+        // Use many top-level loops each with one scrape block to exceed cap without nesting.
+        var loopId = Guid.NewGuid();
+        var (db, userId, configId, taskId) = Seed((tid, cid, _) =>
         {
-            LoopBlock(loop1, tid, null, "l1", values),
-            LoopBlock(loop2, tid, loop1, "l2", values),
-            LoopBlock(loop3, tid, loop2, "l3", values),
-            LoopBlock(loop4, tid, loop3, "l4", values),
-            ScrapeBlock(Guid.NewGuid(), tid, loop4, cid),
+            var blocks = new List<TaskBlock>();
+            // 1001 top-level loop blocks, each with one scrape child — exceeds BatchCap of 1000.
+            for (int i = 0; i < 1001; i++)
+            {
+                var lid = Guid.NewGuid();
+                blocks.Add(LoopBlock(lid, tid, null, $"l{i}", new[] { "x" }, order: i));
+                blocks.Add(ScrapeBlock(Guid.NewGuid(), tid, lid, cid, order: 0));
+            }
+            return blocks;
         });
 
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
@@ -151,7 +180,7 @@ public class QueueExpansionServiceTests
     }
 
     [Fact]
-    public async Task LoopRef_binding_is_baked_into_literalValue()
+    public async Task LoopRef_binding_does_not_bake_literalValue()
     {
         var loopId = Guid.NewGuid();
         var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
@@ -164,17 +193,16 @@ public class QueueExpansionServiceTests
 
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
 
-        Assert.Equal(2, preview.Results.Count);
-        var first = preview.Results[0].PatchedConfigJson;
-        var step = first.GetProperty("steps")[0];
-        Assert.Equal("alpha", step.GetProperty("options").GetProperty("literalValue").GetString());
+        Assert.Equal(1, preview.Results.Count);
+        Assert.Equal(new[] { "alpha", "beta" }, preview.Results[0].SearchTerms);
 
-        var second = preview.Results[1].PatchedConfigJson;
-        Assert.Equal("beta", second.GetProperty("steps")[0].GetProperty("options").GetProperty("literalValue").GetString());
+        var step = preview.Results[0].PatchedConfigJson.GetProperty("steps")[0];
+        // loopRef must NOT bake a literalValue — extension resolves at runtime.
+        Assert.False(step.GetProperty("options").TryGetProperty("literalValue", out _));
     }
 
     [Fact]
-    public async Task Literal_binding_baked_directly()
+    public async Task Literal_binding_still_baked_into_literalValue()
     {
         var loopId = Guid.NewGuid();
         var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
@@ -191,7 +219,7 @@ public class QueueExpansionServiceTests
     }
 
     [Fact]
-    public async Task Unbound_setInput_emits_warning_and_resolves_to_empty()
+    public async Task Unbound_setInput_emits_warning()
     {
         var loopId = Guid.NewGuid();
         var (db, userId, configId, taskId) = Seed((tid, cid, _) => new List<TaskBlock>
@@ -201,7 +229,6 @@ public class QueueExpansionServiceTests
         });
 
         var preview = await BuildService(db).ExpandAsync(userId, taskId);
-        Assert.Equal("", preview.Results[0].PatchedConfigJson.GetProperty("steps")[0].GetProperty("options").GetProperty("literalValue").GetString());
         Assert.Contains(preview.Warnings, w => w.Code == ExpansionWarningCodes.NewStepUnbound);
     }
 

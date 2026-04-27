@@ -19,6 +19,17 @@ public class RunCsvExporter : IRunCsvExporter
         foreach (var iter in iters.EnumerateArray())
         {
             if (iter.ValueKind != JsonValueKind.Object) continue;
+            // New wire format: check outputs for at least one table
+            if (iter.TryGetProperty("outputs", out var outputs) && outputs.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var output in outputs.EnumerateObject())
+                {
+                    if (output.Value.TryGetProperty("kind", out var kind) && kind.GetString() == "table")
+                        return true;
+                }
+                return false;
+            }
+            // Legacy format: check data array
             if (!iter.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) continue;
             foreach (var row in data.EnumerateArray())
             {
@@ -85,6 +96,25 @@ public class RunCsvExporter : IRunCsvExporter
         if (!run.ResultJsonb.RootElement.TryGetProperty("iterations", out var iters)) return Array.Empty<ResolvedColumn>();
         foreach (var iter in iters.EnumerateArray())
         {
+            // New wire format: extract displayNames from table schema columns
+            if (iter.TryGetProperty("outputs", out var outputs) && outputs.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var outputProp in outputs.EnumerateObject())
+                {
+                    var output = outputProp.Value;
+                    if (!output.TryGetProperty("kind", out var kind) || kind.GetString() != "table") continue;
+                    if (!output.TryGetProperty("schema", out var schema)) continue;
+                    if (!schema.TryGetProperty("columns", out var schemaCols) || schemaCols.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var sc in schemaCols.EnumerateArray())
+                    {
+                        var displayName = sc.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String ? dn.GetString() ?? "" : "";
+                        if (!string.IsNullOrEmpty(displayName) && seen.Add(displayName)) ordered.Add(displayName);
+                    }
+                }
+                continue;
+            }
+
+            // Legacy format
             if (!iter.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) continue;
             foreach (var row in data.EnumerateArray())
             {
@@ -113,6 +143,52 @@ public class RunCsvExporter : IRunCsvExporter
         {
             if (iter.ValueKind != JsonValueKind.Object) continue;
             var iterStatus = iter.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "";
+            var iterLabel = iter.TryGetProperty("iterationLabel", out var lbl) && lbl.ValueKind == JsonValueKind.String ? lbl.GetString() ?? "" : run.IterationLabel ?? "";
+
+            // New wire format: outputs map
+            if (iter.TryGetProperty("outputs", out var outputs) && outputs.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var outputProp in outputs.EnumerateObject())
+                {
+                    var output = outputProp.Value;
+                    if (!output.TryGetProperty("kind", out var kind) || kind.GetString() != "table") continue;
+                    if (!output.TryGetProperty("rows", out var wireRows) || wireRows.ValueKind != JsonValueKind.Array) continue;
+                    if (!output.TryGetProperty("schema", out var schema) || !schema.TryGetProperty("columns", out var schemaCols)) continue;
+
+                    // Build colId → displayName map
+                    var colIdToDisplay = new Dictionary<string, string>(StringComparer.Ordinal);
+                    if (schemaCols.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var sc in schemaCols.EnumerateArray())
+                        {
+                            var colId = sc.TryGetProperty("id", out var cid) && cid.ValueKind == JsonValueKind.String ? cid.GetString() ?? "" : "";
+                            var dispName = sc.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String ? dn.GetString() ?? colId : colId;
+                            if (!string.IsNullOrEmpty(colId)) colIdToDisplay[colId] = dispName;
+                        }
+                    }
+
+                    foreach (var wireRow in wireRows.EnumerateArray())
+                    {
+                        if (wireRow.ValueKind != JsonValueKind.Object) continue;
+                        if (!wireRow.TryGetProperty("cells", out var cells) || cells.ValueKind != JsonValueKind.Object) continue;
+
+                        if (includeRunId) { sb.Append(EscapeCell(run.Id.ToString())); sb.Append(','); }
+                        sb.Append(EscapeCell(iterLabel)); sb.Append(',');
+                        sb.Append(EscapeCell(iterStatus));
+                        foreach (var col in columns)
+                        {
+                            sb.Append(',');
+                            // col.OriginalName is the displayName from the schema; find the colId by matching displayName
+                            var colId = colIdToDisplay.FirstOrDefault(kvp => kvp.Value == col.OriginalName).Key ?? col.OriginalName;
+                            sb.Append(EscapeCell(ExtractWireCell(cells, colId)));
+                        }
+                        sb.Append("\r\n");
+                    }
+                }
+                continue;
+            }
+
+            // Legacy format: data array
             if (!iter.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) continue;
             foreach (var row in data.EnumerateArray())
             {
@@ -127,6 +203,13 @@ public class RunCsvExporter : IRunCsvExporter
                 sb.Append("\r\n");
             }
         }
+    }
+
+    private static string ExtractWireCell(JsonElement cells, string colId)
+    {
+        if (!cells.TryGetProperty(colId, out var cell) || cell.ValueKind != JsonValueKind.Object) return "";
+        if (!cell.TryGetProperty("raw", out var raw)) return "";
+        return raw.ValueKind == JsonValueKind.String ? raw.GetString() ?? "" : raw.GetRawText();
     }
 
     private static string ExtractCell(JsonElement row, string key)

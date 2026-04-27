@@ -21,11 +21,13 @@ async function resolveButtonWithRetry(
 export async function paginatePages(params: {
   paginationSelector: SelectorDescriptor;
   pageCount?: number;
+  paginationDelayMs?: number;
   onPage?: (pageIndex: number) => Promise<void>;
   onProgress?: (msg: string) => void;
   afk?: boolean;
 }): Promise<number> {
   const { paginationSelector, pageCount = 0, onPage, onProgress, afk } = params;
+  const interPageBase = params.paginationDelayMs ?? 1500;
   const maxPages = pageCount > 0 ? Math.min(pageCount, PAGE_SAFETY_CAP) : PAGE_SAFETY_CAP;
   let pagesScraped = 1;
 
@@ -52,11 +54,11 @@ export async function paginatePages(params: {
       break;
     }
 
-    await randomDelay(400, 700);
+    await randomDelay(200, 400);
     lastSnapshot = document.body.innerText.substring(0, 2000);
     pagesScraped++;
     await onPage?.(i);
-    await randomDelay(600, 1400);
+    await randomDelay(interPageBase * 0.7, interPageBase * 1.3);
   }
 
   return pagesScraped;
@@ -65,12 +67,14 @@ export async function paginatePages(params: {
 export async function paginateElement(params: {
   paginationSelector: SelectorDescriptor;
   paginationCount?: number;
+  paginationDelayMs?: number;
   onPage?: (pageIndex: number) => Promise<void>;
   onProgress?: (msg: string) => void;
   container?: Element | null;
   afk?: boolean;
 }): Promise<number> {
   const { paginationSelector, paginationCount = 0, onPage, onProgress, container, afk } = params;
+  const interPageBase = params.paginationDelayMs ?? 1500;
   const maxPages = paginationCount > 0 ? Math.min(paginationCount, ELEMENT_SAFETY_CAP) : ELEMENT_SAFETY_CAP;
   let pagesScraped = 1;
 
@@ -99,10 +103,10 @@ export async function paginateElement(params: {
       break;
     }
 
-    await randomDelay(400, 700);
+    await randomDelay(200, 400);
     pagesScraped++;
     await onPage?.(i);
-    await randomDelay(600, 1400);
+    await randomDelay(interPageBase * 0.7, interPageBase * 1.3);
   }
 
   return pagesScraped;

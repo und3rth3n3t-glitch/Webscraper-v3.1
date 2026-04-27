@@ -86,6 +86,15 @@ export interface ScrapeElementConfig {
   paginate: boolean;
   paginationSelector: SelectorDescriptor | null;
   paginationCount: number;
+  outputKey?: string;
+  columnOverrides?: ColumnOverride[];
+}
+
+export type ColumnType = 'text' | 'number' | 'percent' | 'currency' | 'date' | 'boolean';
+
+export interface ColumnOverride {
+  flatKey: string;
+  type: ColumnType;
 }
 
 export interface ScrapeOptions {
@@ -95,6 +104,10 @@ export interface ScrapeOptions {
   paginate: boolean;
   paginationSelector: SelectorDescriptor | null;
   pageCount: number;
+  scrollIncrementVh?: number;     // 0.1–1.0, default 0.4
+  scrollDelayMs?: number;         // ms, default 700
+  paginationDelayMs?: number;     // ms, default 1500
+  expandDelayMs?: number;         // ms, default 350
   elements: ScrapeElementConfig[];
 }
 
@@ -183,7 +196,10 @@ export interface ScraperConfig {
   url: string;
   steps: Step[];
   dataMapping?: DataMapping;
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   createdAt: number;
   updatedAt: number;
+  shared?: boolean;
+  lastSyncedAt?: string | null;
+  dirty?: boolean;
 }

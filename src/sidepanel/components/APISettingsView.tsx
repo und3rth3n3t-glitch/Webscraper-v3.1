@@ -3,7 +3,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useUiStore } from '../stores/uiStore';
 import { testConnection } from '../utils/apiClient';
 import { validateBackendUrl } from '../utils/validateBackendUrl';
-import { getPrefs, setPref } from '../utils/storage';
+import { getPrefs, setPref, getApiToken, setApiToken, clearApiToken } from '../utils/storage';
 
 type StatusToken = 'success' | 'error' | 'pending' | 'running';
 
@@ -34,12 +34,13 @@ export default function APISettingsView() {
   const [modeDraft, setModeDraft] = useState<'local' | 'queue'>(mode);
   const [testing, setTesting] = useState(false);
   const [debugEnabled, setDebugEnabled] = useState(false);
+  const [mouseVisible, setMouseVisible] = useState(false);
+  const [typingVisible, setTypingVisible] = useState(false);
+  const [clearVisible, setClearVisible] = useState(false);
 
-  // Load saved token from chrome.storage.local on mount
   useEffect(() => {
     const { serverUrl: url, setConnection: connect } = useSettingsStore.getState();
-    browser.storage.local.get('bb_jwt').then((result: Record<string, unknown>) => {
-      const saved = result['bb_jwt'] as string | undefined;
+    getApiToken().then((saved) => {
       if (saved) {
         setTokenDraft(saved);
         connect(url, saved);
@@ -48,6 +49,9 @@ export default function APISettingsView() {
 
     getPrefs().then((prefs) => {
       setDebugEnabled(!!prefs.debug);
+      setMouseVisible(!!prefs.humanizeMouseVisible);
+      setTypingVisible(!!prefs.humanizeTypingVisible);
+      setClearVisible(!!prefs.humanizeClearVisible);
     }).catch(() => {});
   }, []);
 
@@ -58,6 +62,36 @@ export default function APISettingsView() {
     } catch {
       showToast("Couldn't save debug preference.", 'error');
       setDebugEnabled(!next);
+    }
+  };
+
+  const toggleMouseVisible = async (next: boolean) => {
+    setMouseVisible(next);
+    try {
+      await setPref('humanizeMouseVisible', next);
+    } catch {
+      showToast("Couldn't save preference.", 'error');
+      setMouseVisible(!next);
+    }
+  };
+
+  const toggleTypingVisible = async (next: boolean) => {
+    setTypingVisible(next);
+    try {
+      await setPref('humanizeTypingVisible', next);
+    } catch {
+      showToast("Couldn't save preference.", 'error');
+      setTypingVisible(!next);
+    }
+  };
+
+  const toggleClearVisible = async (next: boolean) => {
+    setClearVisible(next);
+    try {
+      await setPref('humanizeClearVisible', next);
+    } catch {
+      showToast("Couldn't save preference.", 'error');
+      setClearVisible(!next);
     }
   };
 
@@ -74,7 +108,7 @@ export default function APISettingsView() {
       return;
     }
     try {
-      await browser.storage.local.set({ bb_jwt: tokenDraft });
+      await setApiToken(tokenDraft);
       setConnection(urlDraft, tokenDraft);
       setMode(modeDraft);
       setWorkerName(trimmedName || 'My Browser');
@@ -231,7 +265,7 @@ export default function APISettingsView() {
             onClick={() => {
               useSettingsStore.getState().clearToken();
               setTokenDraft('');
-              browser.storage.local.remove('bb_jwt').catch(() => {});
+              clearApiToken().catch(() => {});
               browser.runtime.sendMessage({ type: 'STOP_SIGNALR' }).catch(() => {});
             }}
           >
@@ -250,6 +284,42 @@ export default function APISettingsView() {
           Show debug info in scrape output
         </label>
         <p className="form-hint">Developer option — adds saved selector descriptors and other diagnostic fields when chart scrapes fail. Useful when reporting an issue or troubleshooting selector resolution.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={mouseVisible}
+            onChange={(e) => toggleMouseVisible(e.target.checked)}
+          />
+          Show synthetic mouse cursor
+        </label>
+        <p className="form-hint">Draws a small dot on the page so you can see where the automation is moving. Cosmetic only — does not change what the site sees.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={typingVisible}
+            onChange={(e) => toggleTypingVisible(e.target.checked)}
+          />
+          Type one character at a time
+        </label>
+        <p className="form-hint">Slower, more human-looking typing. Some sites with aggressive autocomplete can steal focus mid-type — turn this off if a search field stops accepting your text.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={clearVisible}
+            onChange={(e) => toggleClearVisible(e.target.checked)}
+          />
+          Humanize input clearing
+        </label>
+        <p className="form-hint">Selects the existing text and presses Delete instead of wiping the field instantly. Turn on if a site flags the snap-clear as automated.</p>
       </div>
     </div>
   );

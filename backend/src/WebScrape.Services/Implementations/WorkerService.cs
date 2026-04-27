@@ -1,5 +1,6 @@
 using AutoMapper;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using WebScrape.Data;
 using WebScrape.Data.Dto;
 using WebScrape.Data.Entities;
@@ -10,13 +11,17 @@ namespace WebScrape.Services.Implementations;
 
 public class WorkerService : IWorkerService
 {
+    public static readonly TimeSpan BumpThrottle = TimeSpan.FromSeconds(5);
+
     private readonly WebScrapeDbContext _db;
     private readonly IMapper _mapper;
+    private readonly IMemoryCache _cache;
 
-    public WorkerService(WebScrapeDbContext db, IMapper mapper)
+    public WorkerService(WebScrapeDbContext db, IMapper mapper, IMemoryCache cache)
     {
         _db = db;
         _mapper = mapper;
+        _cache = cache;
     }
 
     public async Task<WorkerConnection> RegisterAsync(Guid userId, Guid apiKeyId, string clientName, string extensionVersion, string connectionId, CancellationToken ct = default)
@@ -81,5 +86,28 @@ public class WorkerService : IWorkerService
             .OrderBy(w => w.Name)
             .ToListAsync(ct);
         return _mapper.Map<List<WorkerDto>>(workers);
+    }
+
+    public async Task BumpLastSeenAsync(string connectionId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(connectionId)) return;
+
+        var cacheKey = $"worker-bump:{connectionId}";
+        if (_cache.TryGetValue(cacheKey, out _)) return;
+
+        var worker = await _db.WorkerConnections.FirstOrDefaultAsync(w => w.CurrentConnection == connectionId, ct);
+        if (worker is null) return;
+
+        worker.LastSeenAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+
+        _cache.Set(cacheKey, true, BumpThrottle);
+    }
+
+    public async Task<WorkerConnection?> GetWorkerByApiKeyAsync(Guid userId, Guid apiKeyId, CancellationToken ct = default)
+    {
+        return await _db.WorkerConnections
+            .AsNoTracking()
+            .FirstOrDefaultAsync(w => w.UserId == userId && w.ApiKeyId == apiKeyId, ct);
     }
 }

@@ -111,6 +111,53 @@ export default function ScrapeWholePageForm({ editingStepId }: Props) {
         </div>
       )}
 
+      <details className="form-group">
+        <summary className="form-label" style={{ cursor: 'pointer' }}>Human pacing (advanced)</summary>
+        <p className="form-hint">All values in milliseconds (or fraction of viewport for scroll step). Leave blank for sensible defaults.</p>
+
+        <label className="form-label mt-8">Scroll step size (× viewport)</label>
+        <input
+          type="number"
+          step="0.05"
+          min="0.1"
+          max="1.0"
+          className="form-input"
+          value={opts.scrollIncrementVh ?? ''}
+          placeholder="0.4"
+          onChange={(e) => updateOpt('scrollIncrementVh', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between scroll steps (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.scrollDelayMs ?? ''}
+          placeholder="700"
+          onChange={(e) => updateOpt('scrollDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between pagination clicks (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.paginationDelayMs ?? ''}
+          placeholder="1500"
+          onChange={(e) => updateOpt('paginationDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+
+        <label className="form-label mt-8">Pause between expand-button clicks (ms)</label>
+        <input
+          type="number"
+          min="0"
+          className="form-input"
+          value={opts.expandDelayMs ?? ''}
+          placeholder="350"
+          onChange={(e) => updateOpt('expandDelayMs', e.target.value === '' ? undefined : Number(e.target.value))}
+        />
+      </details>
+
       <StepConditionEditor stepId={step.id} />
 
       <div className="form-actions">

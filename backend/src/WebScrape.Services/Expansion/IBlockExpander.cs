@@ -3,10 +3,9 @@ using WebScrape.Data.Enums;
 
 namespace WebScrape.Services.Expansion;
 
-// One expansion frame represents the assignments active at a given depth
-// during the cartesian walk. `LoopAssignments` keys are loop block ids
-// (NOT names — names can be renamed; ids are immutable across saves).
-public record ExpansionFrame(IReadOnlyDictionary<Guid, string> LoopAssignments);
+public record ExpansionFrame(
+    IReadOnlyDictionary<Guid, string> LoopAssignments,
+    IReadOnlyList<string> SearchTerms);
 
 // Context passed top-down so expanders can reach siblings/children of the
 // current block + look up loop names for label rendering.
@@ -31,14 +30,14 @@ public static class ExpansionWarningCodes
     public const string ConfigNotFoundAtPopulate = "CONFIG_NOT_FOUND_AT_POPULATE";
 }
 
-// Result emitted by the visitor — one per scrape leaf × cartesian tuple.
 public record ExpansionResult(
     Guid ScrapeBlockId,
     Guid ScraperConfigId,
     string ConfigName,
     Dictionary<Guid, string> Assignments,
     string IterationLabel,
-    System.Text.Json.JsonElement PatchedConfigJson);
+    System.Text.Json.JsonElement PatchedConfigJson,
+    List<string> SearchTerms);
 
 public interface IBlockExpander
 {

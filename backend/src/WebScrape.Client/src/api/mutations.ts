@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from './client';
-import type { AccountDto, BatchDispatchResultDto, CreateApiKeyResponseDto, CreateBatchDto, CreateScraperConfigDto, ExpansionPreviewDto, SaveTaskDto, ScraperConfigDto, TaskDto } from './types';
+import type { AccountDto, ApiKeyDto, BatchDispatchResultDto, CreateApiKeyResponseDto, CreateBatchDto, CreateScraperConfigDto, ExpansionPreviewDto, SaveTaskDto, ScraperConfigDto, TaskDto } from './types';
 
 export function useLogin() {
   const qc = useQueryClient();
@@ -46,6 +46,15 @@ export function useRevokeApiKey() {
     mutationFn: async (id: string) => {
       await api.delete(`/api/api-keys/${id}`);
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
+  });
+}
+
+export function useRenameApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, name }: { id: string; name: string }) =>
+      (await api.patch<ApiKeyDto>(`/api/api-keys/${id}`, { name })).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   });
 }
