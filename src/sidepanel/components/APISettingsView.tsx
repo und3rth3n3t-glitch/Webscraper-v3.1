@@ -123,26 +123,10 @@ export default function APISettingsView() {
   };
 
   const toggleUseRealInput = async (next: boolean): Promise<void> => {
-    if (next) {
-      // Turning ON requires a one-time permission grant. Must be called
-      // from a user-gesture handler (this onChange qualifies).
-      let granted: boolean;
-      try {
-        granted = await chrome.permissions.request({ permissions: ['debugger'] });
-      } catch (err) {
-        showToast(`Couldn't request permission: ${(err as Error).message}`, 'error');
-        return;
-      }
-      if (!granted) {
-        showToast('Permission denied — falling back to synthetic input.', 'warning');
-        return;
-      }
-    } else {
-      // Turning OFF revokes the permission. Best effort.
-      try {
-        await chrome.permissions.remove({ permissions: ['debugger'] });
-      } catch { /* ignore */ }
-    }
+    // Chrome rejects `debugger` as an optional permission, so it now lives
+    // in the manifest's required `permissions` array (granted at install).
+    // The toggle is purely a pref — controls whether the engine routes
+    // input through CDP or stays synthetic. No runtime prompt.
     setUseRealInput(next);
     try {
       await setPref('useRealInput', next);
@@ -486,10 +470,10 @@ export default function APISettingsView() {
           Use real input events (more stealthy)
         </label>
         <p className="form-hint">
-          Asks for permission to use Chrome's debugging API to send real mouse and keyboard events.
-          Sites that look at <code>event.isTrusted</code> won't see them as automated.
-          A yellow "Chrome is being controlled by automated test software" bar appears on scrape windows
-          while running. Turn off any time to revoke permission.
+          Routes mouse and keyboard events through Chrome's debugging API so they have <code>event.isTrusted: true</code>
+          — sites with basic bot detection won't flag them as automated. A yellow "Chrome is being controlled by
+          automated test software" bar appears on scrape windows while a flow is running. Turn off any time to
+          fall back to synthetic events.
         </p>
       </div>
     </div>

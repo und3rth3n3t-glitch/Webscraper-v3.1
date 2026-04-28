@@ -487,6 +487,31 @@ export async function expandHiddenElements(opts: {
     return /\bopen\b|\bexpanded\b/.test(cls);
   };
 
+  // Skip anchors that would navigate or open a new tab. Now that we may be
+  // dispatching real isTrusted: true clicks via CDP, anchor default actions
+  // actually fire — clicking a Wikipedia coordinate link, for example, can
+  // redirect the scrape window mid-flow. Fragment-only and javascript: hrefs
+  // are safe (in-page scroll / no-op).
+  //
+  // Walks up to document.body checking ancestors too: clicking ANY descendant
+  // of an <a href="..."> triggers the anchor's navigation when the click
+  // event bubbles. The original element-only check missed cases like
+  // <a href="..."><span class="show-more">…</span></a>.
+  const wouldNavigateOrOpen = (el: HTMLElement): boolean => {
+    let cur: HTMLElement | null = el;
+    while (cur && cur !== document.body) {
+      if (cur instanceof HTMLAnchorElement) {
+        if (cur.target && cur.target !== '_self') return true;
+        const href = cur.getAttribute('href');
+        if (href && !href.startsWith('#') && !href.toLowerCase().startsWith('javascript:')) {
+          return true;
+        }
+      }
+      cur = cur.parentElement;
+    }
+    return false;
+  };
+
   const baseDelay = opts.delayMs ?? 350;
   const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -503,6 +528,7 @@ export async function expandHiddenElements(opts: {
       if (totalClicked >= MAX_EXPAND_CLICKS) return;
       if ((el as HTMLElement).offsetParent === null) continue;
       if (isLikelyExpanded(el as HTMLElement)) continue;
+      if (wouldNavigateOrOpen(el as HTMLElement)) continue;
       try {
         // naturalClick runs the Fitts curve regardless of cursor visibility — afk:false
         // keeps the anti-ban benefit even when the operator hasn't enabled the cosmetic cursor.

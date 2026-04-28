@@ -12,8 +12,7 @@ export default defineConfig({
   manifest: {
     name: 'Blueberry Web Scraper',
     description: 'Record and execute web scraping flows',
-    permissions: ['sidePanel', 'activeTab', 'storage', 'scripting', 'tabs', 'offscreen', 'notifications'],
-    optional_permissions: ['debugger'],
+    permissions: ['sidePanel', 'activeTab', 'storage', 'scripting', 'tabs', 'offscreen', 'notifications', 'debugger'],
     host_permissions: ['<all_urls>'],
     icons: { 16: 'icons/icon16.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' },
     side_panel: { default_path: 'sidepanel/index.html' },

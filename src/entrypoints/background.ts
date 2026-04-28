@@ -25,6 +25,7 @@ import {
   isTaskNotification,
   isBatchNotification,
   taskIdFromNotificationId,
+  taskNotificationId,
 } from '../background/notifications';
 
 export default defineBackground(() => {
@@ -92,6 +93,20 @@ export default defineBackground(() => {
   // idle (after firing the batch-complete notification). Counts FLOW_COMPLETE
   // as succeeded; FLOW_ERROR and tab-closed-mid-task as failed.
   const batchStats = { total: 0, succeeded: 0, failed: 0 };
+
+  // Badge "!" while any task is paused. Cleared when the last paused task
+  // resumes or completes. Badge background uses the warning token from
+  // index.css (--warning #F57F17) so the chip is visually consistent.
+  const pausedTaskIds = new Set<string>();
+
+  function refreshBadge(): void {
+    if (pausedTaskIds.size > 0) {
+      chrome.action.setBadgeText({ text: '!' }).catch(() => {});
+      chrome.action.setBadgeBackgroundColor({ color: '#F57F17' }).catch(() => {});
+    } else {
+      chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    }
+  }
 
   function persistActive(): void {
     chrome.storage.session.set({ activeRemoteTasks: scheduler.serializeActive() }).catch(() => {});
@@ -320,6 +335,7 @@ export default defineBackground(() => {
         config: resolved.config,
         searchTerms: resolved.searchTerms,
         taskId: resolved.taskId,
+        drainResumed: false, // initial send — task just started
       },
     }).catch((err: Error) => {
       relayHubInvocation('SEND_TASK_ERROR', {
@@ -453,11 +469,21 @@ export default defineBackground(() => {
         const hubPayload = mapFlowPaused(ctx, payload as unknown as FlowPausedPayload);
         relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
 
-        // PR6 — fire a Chrome notification only when:
+        // Badge "!" + taskbar attention as persistent / OS-level signals.
+        // Survive notification suppression (Focus Assist) and unfocused
+        // task windows.
+        pausedTaskIds.add(record.task.id);
+        refreshBadge();
+        chrome.windows.update(record.windowId, { drawAttention: true }).catch(() => {});
+
+        // Fire a Chrome notification when:
         //   - notifyOnPause toggle is on
-        //   - scheduler is in drain phase (mid-drain re-auth, not preflight)
         //   - the focused window is NOT this task's window
-        if (notifyOnPause && scheduler.getPhase() === 'drain') {
+        // (Previously also gated on phase === 'drain'; relaxed because new
+        // task windows open `focused: true` then immediately lose focus to
+        // the next window in a parallel batch — preflight pauses on
+        // already-backgrounded windows now notify correctly.)
+        if (notifyOnPause) {
           const target = record;
           chrome.windows.getLastFocused().then((focusedWindow) => {
             if (!focusedWindow || focusedWindow.id !== target.windowId) {
@@ -648,6 +674,9 @@ export default defineBackground(() => {
         browser.tabs.sendMessage(target.tabId, { type: 'RESUME_AFTER_PAUSE' })
           .catch((err) => console.error('[SW] RESUME_AFTER_PAUSE failed:', err));
         activePauseState = null;
+        pausedTaskIds.delete(target.task.id);
+        refreshBadge();
+        chrome.notifications.clear(taskNotificationId(target.task.id)).catch(() => {});
       }
       return;
     }
@@ -704,7 +733,11 @@ export default defineBackground(() => {
             pendingContinuations.delete(target.tabId);
             console.warn('[SW] resume — draining held continuation | tabId:', target.tabId);
             setTimeout(() => {
-              browser.tabs.sendMessage(target.tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+              const enriched = {
+                ...(continuation as Record<string, unknown>),
+                drainResumed: scheduler.findByTabId(target.tabId)?.drainResumed ?? false,
+              };
+              browser.tabs.sendMessage(target.tabId, { type: 'EXECUTE_FLOW', payload: enriched })
                 .then(() => console.warn('[SW] held continuation delivered | tabId:', target.tabId))
                 .catch((err: Error) => {
                   console.warn('[SW] held continuation delivery failed | tabId:', target.tabId, '— re-registering | err:', err.message);
@@ -727,7 +760,11 @@ export default defineBackground(() => {
           pendingContinuations.delete(tabId);
           console.warn('[SW] resume — draining held continuation | tabId:', tabId);
           setTimeout(() => {
-            browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+            const enriched = {
+              ...(continuation as Record<string, unknown>),
+              drainResumed: scheduler.findByTabId(tabId)?.drainResumed ?? false,
+            };
+            browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: enriched })
               .then(() => console.warn('[SW] held continuation delivered | tabId:', tabId))
               .catch((err: Error) => {
                 console.warn('[SW] held continuation delivery failed | tabId:', tabId, '— re-registering | err:', err.message);
@@ -955,7 +992,14 @@ export default defineBackground(() => {
         // can retry — this preserves the redirect-retry behaviour without double-fire.
         pendingContinuations.delete(tabId);
         setTimeout(() => {
-          browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+          const taskRecord = scheduler.findByTabId(tabId);
+          const drainResumedValue = taskRecord?.drainResumed ?? false;
+          console.warn('[SW] tabs.onUpdated enriching | tabId:', tabId, '| recordFound:', !!taskRecord, '| recordTaskId:', taskRecord?.task.id, '| drainResumed:', drainResumedValue, '| schedulerActiveCount:', scheduler.getActiveCount());
+          const enriched = {
+            ...(continuation as Record<string, unknown>),
+            drainResumed: drainResumedValue,
+          };
+          browser.tabs.sendMessage(tabId, { type: 'EXECUTE_FLOW', payload: enriched })
             .then(() => { console.warn('[SW] Continuation delivered to tabId:', tabId); })
             .catch((err: Error) => {
               console.warn('[SW] Continuation delivery failed for tabId:', tabId, '— re-registering for retry | err:', err.message);

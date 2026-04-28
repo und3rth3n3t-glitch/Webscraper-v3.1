@@ -100,7 +100,8 @@ export default function App() {
   const saveAndSwitchTab = useUiStore((s) => s.saveAndSwitchTab);
   const discardAndSwitchTab = useUiStore((s) => s.discardAndSwitchTab);
   const cancelTabSwitch = useUiStore((s) => s.cancelTabSwitch);
-  const pausedTasks = useQueueStore((s) => s.tasks.filter((t) => t.status === 'paused' && !!t.pause));
+  const tasks = useQueueStore((s) => s.tasks);
+  const pausedTasks = tasks.filter((t) => t.status === 'paused' && !!t.pause);
 
   const isDirty = useConfigStore((s) => s.isDirty);
   const isPickerActive = useUiStore((s) => s.isPickerActive);
