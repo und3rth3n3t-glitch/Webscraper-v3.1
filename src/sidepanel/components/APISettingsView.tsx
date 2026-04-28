@@ -49,6 +49,8 @@ export default function APISettingsView() {
   const [mouseVisible, setMouseVisible] = useState(false);
   const [typingVisible, setTypingVisible] = useState(false);
   const [clearVisible, setClearVisible] = useState(false);
+  const [humanizeScroll, setHumanizeScroll] = useState(true);
+  const [useRealInput, setUseRealInput] = useState(false);
 
   useEffect(() => {
     const { serverUrl: url, setConnection: connect } = useSettingsStore.getState();
@@ -64,6 +66,9 @@ export default function APISettingsView() {
       setMouseVisible(!!prefs.humanizeMouseVisible);
       setTypingVisible(!!prefs.humanizeTypingVisible);
       setClearVisible(!!prefs.humanizeClearVisible);
+      // Default true if pref absent — preserves existing behaviour.
+      setHumanizeScroll(typeof prefs.humanizeScroll === 'boolean' ? prefs.humanizeScroll : true);
+      setUseRealInput(!!prefs.useRealInput);
     }).catch(() => {});
   }, []);
 
@@ -104,6 +109,46 @@ export default function APISettingsView() {
     } catch {
       showToast("Couldn't save preference.", 'error');
       setClearVisible(!next);
+    }
+  };
+
+  const toggleHumanizeScroll = async (next: boolean) => {
+    setHumanizeScroll(next);
+    try {
+      await setPref('humanizeScroll', next);
+    } catch {
+      showToast("Couldn't save preference.", 'error');
+      setHumanizeScroll(!next);
+    }
+  };
+
+  const toggleUseRealInput = async (next: boolean): Promise<void> => {
+    if (next) {
+      // Turning ON requires a one-time permission grant. Must be called
+      // from a user-gesture handler (this onChange qualifies).
+      let granted: boolean;
+      try {
+        granted = await chrome.permissions.request({ permissions: ['debugger'] });
+      } catch (err) {
+        showToast(`Couldn't request permission: ${(err as Error).message}`, 'error');
+        return;
+      }
+      if (!granted) {
+        showToast('Permission denied — falling back to synthetic input.', 'warning');
+        return;
+      }
+    } else {
+      // Turning OFF revokes the permission. Best effort.
+      try {
+        await chrome.permissions.remove({ permissions: ['debugger'] });
+      } catch { /* ignore */ }
+    }
+    setUseRealInput(next);
+    try {
+      await setPref('useRealInput', next);
+    } catch {
+      showToast("Couldn't save preference.", 'error');
+      setUseRealInput(!next);
     }
   };
 
@@ -417,6 +462,35 @@ export default function APISettingsView() {
           Humanize input clearing
         </label>
         <p className="form-hint">Selects the existing text and presses Delete instead of wiping the field instantly. Turn on if a site flags the snap-clear as automated.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={humanizeScroll}
+            onChange={(e) => toggleHumanizeScroll(e.target.checked)}
+          />
+          Humanize scrolling
+        </label>
+        <p className="form-hint">Slow, eased scrolling that mimics a real reader. Turn off for faster test runs — note: very long lazy-load pages may load less content.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={useRealInput}
+            onChange={(e) => toggleUseRealInput(e.target.checked)}
+          />
+          Use real input events (more stealthy)
+        </label>
+        <p className="form-hint">
+          Asks for permission to use Chrome's debugging API to send real mouse and keyboard events.
+          Sites that look at <code>event.isTrusted</code> won't see them as automated.
+          A yellow "Chrome is being controlled by automated test software" bar appears on scrape windows
+          while running. Turn off any time to revoke permission.
+        </p>
       </div>
     </div>
   );

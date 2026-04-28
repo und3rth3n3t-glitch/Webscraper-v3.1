@@ -66,6 +66,17 @@ let activePreflightTimer: PreflightTimer | null = null;
 // checkpoint can short-circuit subsequent iterations.
 let drainResumed = false;
 
+// PR4-fix — early-arrival cache for RESUME_FOR_DRAIN. The SW can broadcast
+// the resume before the engine reaches `maybePauseForDrain` (it's broadcast
+// synchronously when FLOW_PREFLIGHT_READY arrives, but the engine only
+// checks at the top of each search-term iteration — possibly many seconds
+// later). Without this cache, the message is delivered to no listener and
+// the engine waits forever. The persistent listener below sets the flag
+// regardless of whether anything is awaiting; `waitForResumeForDrain`
+// short-circuits if the flag is already true.
+let drainResumedReceived = false;
+let drainResumedResolver: (() => void) | null = null;
+
 // Runtime-toggleable: when true, scrape output includes verbose diagnostic
 // fields (saved-descriptor dumps on chart-resolution failures, etc.). The
 // initial value is loaded from chrome.storage.local prefs (key set by the
@@ -106,6 +117,33 @@ try {
       return;
     }
     t.force();
+  });
+} catch { /* expected: SW restart timing */ }
+
+// Persistent RESUME_FOR_DRAIN listener. Registered once at content-script
+// load so an early-arriving message (sent by SW before maybePauseForDrain
+// runs) is captured into `drainResumedReceived` rather than dropped.
+try {
+  browser.runtime.onMessage.addListener((msg: unknown) => {
+    const m = msg as { type?: string; payload?: { taskId?: string } } | null;
+    if (m?.type !== MessageType.RESUME_FOR_DRAIN) return;
+    const reqTaskId = m.payload?.taskId;
+    const activeTaskId = activePreflightTimer?.taskId;
+    if (!activeTaskId) {
+      swLog('[RESUME_FOR_DRAIN] ignored — no active flow | requestedTaskId:', reqTaskId);
+      return;
+    }
+    if (reqTaskId && reqTaskId !== activeTaskId) {
+      swLog('[RESUME_FOR_DRAIN] ignored — taskId mismatch | requested:', reqTaskId, '| active:', activeTaskId);
+      return;
+    }
+    swLog('[RESUME_FOR_DRAIN] received | taskId:', activeTaskId, '| awaiting:', !!drainResumedResolver);
+    drainResumedReceived = true;
+    if (drainResumedResolver) {
+      const r = drainResumedResolver;
+      drainResumedResolver = null;
+      r();
+    }
   });
 } catch { /* expected: SW restart timing */ }
 
@@ -170,6 +208,8 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     activePreflightTimer.arm();
     swLog('[preflightTimer] armed | taskId:', taskId, '| durationMs:', PREFLIGHT_QUIET_MS);
     drainResumed = false;
+    drainResumedReceived = false;
+    drainResumedResolver = null;
   }
 
   const startTime = Date.now();
@@ -435,6 +475,12 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       activePreflightTimer.cancel();
       activePreflightTimer = null;
     }
+    // PR4-fix — clear drain-resume state on flow end so the next flow
+    // starts fresh. (Listener stays registered; it'll bail on no
+    // active timer.)
+    drainResumed = false;
+    drainResumedReceived = false;
+    drainResumedResolver = null;
     // Cancel any lingering pause-continuation. End-of-flow cleanup so a
     // stale continuation can't fire on a future tab navigation.
     try {
@@ -461,17 +507,16 @@ function waitForResumeSignal(): Promise<void> {
 }
 
 function waitForResumeForDrain(taskId: string): Promise<void> {
+  if (drainResumedReceived) {
+    swLog('[waitForResumeForDrain] already received — short-circuit | taskId:', taskId);
+    return Promise.resolve();
+  }
   swLog('[waitForResumeForDrain] arming | taskId:', taskId);
   return new Promise((resolve) => {
-    const handler = (msg: unknown): void => {
-      const m = msg as { type?: string; payload?: { taskId?: string } } | null;
-      if (m?.type !== MessageType.RESUME_FOR_DRAIN) return;
-      if (m.payload?.taskId !== taskId) return;
+    drainResumedResolver = () => {
       swLog('[waitForResumeForDrain] resumed | taskId:', taskId);
-      browser.runtime.onMessage.removeListener(handler);
       resolve();
     };
-    browser.runtime.onMessage.addListener(handler);
   });
 }
 

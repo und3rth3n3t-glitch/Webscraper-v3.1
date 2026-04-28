@@ -72,6 +72,10 @@ export const MessageType = {
   RESUME_AFTER_PAUSE: 'RESUME_AFTER_PAUSE',
   REGISTER_CONTINUATION: 'REGISTER_CONTINUATION',
   CANCEL_CONTINUATION: 'CANCEL_CONTINUATION',
+  // PR-Bot1: trusted-input round-trip from content → SW → chrome.debugger.
+  CDP_CLICK: 'CDP_CLICK',
+  CDP_TYPE: 'CDP_TYPE',
+  CDP_PRESS_KEY: 'CDP_PRESS_KEY',
 } as const;
 export type MessageType = typeof MessageType[keyof typeof MessageType];
 

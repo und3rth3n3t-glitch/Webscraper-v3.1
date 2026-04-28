@@ -11,6 +11,15 @@ import {
 import { Scheduler, type PersistedActiveRecord } from '../background/scheduler';
 import { originOf } from '../background/originOf';
 import {
+  attachIfNeeded as cdpAttach,
+  detach as cdpDetach,
+  dispatchClick as cdpDispatchClick,
+  dispatchType as cdpDispatchType,
+  dispatchPressKey as cdpDispatchPressKey,
+  isCdpEnabled,
+  initCdpModule,
+} from '../background/cdpInput';
+import {
   notifyTaskPaused,
   notifyBatchComplete,
   isTaskNotification,
@@ -20,6 +29,9 @@ import {
 
 export default defineBackground(() => {
   ensureDebugInit();
+  // Hydrates `useRealInput` pref + checks current debugger permission;
+  // listens for permission revoke + chrome.debugger.onDetach.
+  initCdpModule();
   console.warn('[SW] ✦ background loaded | version:', __APP_VERSION__, '| built:', __BUILD_TIME__);
   const frameRegistry = new Map<number, Map<number, { url: string; isTop: boolean }>>();
   const pendingContinuations = new Map<number, unknown>();
@@ -80,10 +92,6 @@ export default defineBackground(() => {
   // idle (after firing the batch-complete notification). Counts FLOW_COMPLETE
   // as succeeded; FLOW_ERROR and tab-closed-mid-task as failed.
   const batchStats = { total: 0, succeeded: 0, failed: 0 };
-
-  // PR6 — track scheduler phase to detect drain→idle transitions for the
-  // batch-complete notification. Updated after every endTask call.
-  let prevSchedulerPhase: import('../background/scheduler').BatchPhase = 'idle';
 
   function persistActive(): void {
     chrome.storage.session.set({ activeRemoteTasks: scheduler.serializeActive() }).catch(() => {});
@@ -262,7 +270,19 @@ export default defineBackground(() => {
       return;
     }
 
-    const win = await browser.windows.create({ url: resolved.config.url, focused: true, state: 'maximized' });
+    // Cascade: each new task window opens at a 40px staircase offset so
+    // no window is ever fully occluded by another. Chrome's occlusion
+    // detection freezes tabs that are 100% covered for a few seconds;
+    // a sliver of visible pixels is enough to keep them running.
+    const offset = scheduler.getActiveCount() * 40;
+    const win = await browser.windows.create({
+      url: resolved.config.url,
+      focused: true,
+      left: 100 + offset,
+      top: 50 + offset,
+      width: 1280,
+      height: 800,
+    });
     const tab = win?.tabs?.[0];
     if (!tab?.id || !win?.id) {
       relayHubInvocation('SEND_TASK_ERROR', {
@@ -284,6 +304,12 @@ export default defineBackground(() => {
     });
     persistActive();
     lastFocusedTabId = tab.id;
+
+    // CDP attach (best-effort; falls through to synthetic if pref off
+    // or permission missing). Detached on FLOW_PAUSED + flow end.
+    await cdpAttach(tab.id).catch((err: Error) => {
+      console.warn('[SW] cdpAttach failed (synthetic fallback):', err.message);
+    });
 
     await waitForTabComplete(tab.id);
 
@@ -312,12 +338,18 @@ export default defineBackground(() => {
   // start-time there is no scheduler record yet to remove.
   function drainNextRemoteTask(taskId: string, completedStatus: 'completed' | 'failed' = 'failed'): void {
     activePauseState = null;
+    // PR6-fix — capture the scheduler phase BEFORE endTask runs (which may
+    // transition us to idle). The previous prevSchedulerPhase tracker
+    // started at 'idle' and never saw the intermediate preflight/drain
+    // states, so the batch-complete check always failed.
+    const phaseBefore = scheduler.getPhase();
     const closing = scheduler.endTask(taskId);
     if (!closing) {
       // No record — nothing to clean up. tryStartNext is already a no-op when
       // active < cap and pending is empty, so we don't need to call it here.
       return;
     }
+    cdpDetach(closing.tabId).catch(() => { /* best effort */ });
     scheduler.pushRecent({ ...closing.task, status: completedStatus, pausedReason: undefined });
     persistActive();
     persistRecent();
@@ -327,9 +359,11 @@ export default defineBackground(() => {
     if (completedStatus === 'completed') batchStats.succeeded++;
     else batchStats.failed++;
 
-    // PR6 — detect batch-complete (transition to idle). Fire notification + reset.
+    // PR6 — detect batch-complete: this endTask transitioned us out of
+    // active work (any non-idle phase → idle). Fire notification + reset.
     const phaseAfter = scheduler.getPhase();
-    if (phaseAfter === 'idle' && prevSchedulerPhase !== 'idle' && batchStats.total > 0) {
+    if (phaseAfter === 'idle' && phaseBefore !== 'idle' && batchStats.total > 0) {
+      console.warn('[SW] batch complete | stats:', batchStats, '| notifyOnBatchComplete:', notifyOnBatchComplete);
       if (notifyOnBatchComplete) {
         notifyBatchComplete({ ...batchStats });
       }
@@ -337,7 +371,6 @@ export default defineBackground(() => {
       batchStats.succeeded = 0;
       batchStats.failed = 0;
     }
-    prevSchedulerPhase = phaseAfter;
 
     const closingWindowId = closing.windowId;
     const closingTaskId = closing.task.id;
@@ -413,6 +446,10 @@ export default defineBackground(() => {
           trigger: flowPayload.trigger,
           domain: flowPayload.domain,
         };
+        // Detach CDP during user-solves-the-challenge phase so the page's
+        // iframe (e.g. Cloudflare) doesn't fingerprint our debugger while
+        // the user is genuinely solving. Re-attached on RESUME_AFTER_PAUSE.
+        cdpDetach(record.tabId).catch(() => { /* best effort */ });
         const hubPayload = mapFlowPaused(ctx, payload as unknown as FlowPausedPayload);
         relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
 
@@ -563,6 +600,45 @@ export default defineBackground(() => {
       return;
     }
 
+    if (type === 'CDP_CLICK') {
+      const p = (message.payload ?? {}) as { tabId?: number; x: number; y: number };
+      const tabId = p.tabId ?? sender.tab?.id;
+      if (!tabId) {
+        sendResponse({ ok: false, reason: 'no-tabId' });
+        return true;
+      }
+      cdpDispatchClick(tabId, p.x, p.y)
+        .then((ok) => sendResponse({ ok }))
+        .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
+      return true;
+    }
+
+    if (type === 'CDP_TYPE') {
+      const p = (message.payload ?? {}) as { tabId?: number; text: string };
+      const tabId = p.tabId ?? sender.tab?.id;
+      if (!tabId || !p.text) {
+        sendResponse({ ok: false, reason: 'invalid-args' });
+        return true;
+      }
+      cdpDispatchType(tabId, p.text)
+        .then((ok) => sendResponse({ ok }))
+        .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
+      return true;
+    }
+
+    if (type === 'CDP_PRESS_KEY') {
+      const p = (message.payload ?? {}) as { tabId?: number; key: string };
+      const tabId = p.tabId ?? sender.tab?.id;
+      if (!tabId || !p.key) {
+        sendResponse({ ok: false, reason: 'invalid-args' });
+        return true;
+      }
+      cdpDispatchPressKey(tabId, p.key)
+        .then((ok) => sendResponse({ ok }))
+        .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
+      return true;
+    }
+
     // ── Server-initiated task control (handled directly — no sidepanel required) ──
 
     if (type === 'RESUME_TASK') {
@@ -619,6 +695,8 @@ export default defineBackground(() => {
             type: 'RESUME_AFTER_PAUSE',
             payload: resumePayload,
           }).catch((err: Error) => console.warn('[SW] per-task resume sendMessage failed:', err.message));
+
+          cdpAttach(target.tabId).catch(() => { /* best effort */ });
 
           // Drain any held continuation for that specific tab (pause-driven nav).
           const continuation = pendingContinuations.get(target.tabId);

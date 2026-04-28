@@ -7,6 +7,9 @@ let MOUSE_VISIBLE = false;
 let TYPING_VISIBLE = false;
 let CLEAR_VISIBLE = false;
 let DEBUG = false;
+// Default true so existing scrapes keep eased scrolling. Toggle off in
+// Developer Options for fast test runs (see APISettingsView).
+let HUMANIZE_SCROLL = true;
 
 let lastMousePos: Point | null = null;
 
@@ -22,6 +25,7 @@ try {
     TYPING_VISIBLE = !!prefs.humanizeTypingVisible;
     CLEAR_VISIBLE = !!prefs.humanizeClearVisible;
     DEBUG = !!prefs.debug;
+    if (typeof prefs.humanizeScroll === 'boolean') HUMANIZE_SCROLL = prefs.humanizeScroll;
     if (!MOUSE_VISIBLE) removeCursor();
   } catch { /* expected */ }
 })();
@@ -37,9 +41,22 @@ try {
     TYPING_VISIBLE = !!next.humanizeTypingVisible;
     CLEAR_VISIBLE = !!next.humanizeClearVisible;
     DEBUG = !!next.debug;
+    HUMANIZE_SCROLL = typeof next.humanizeScroll === 'boolean' ? next.humanizeScroll : true;
     if (wasVisible && !MOUSE_VISIBLE) removeCursor();
   });
 } catch { /* SW restart timing */ }
+
+async function sendCdpRequest(
+  type: 'CDP_CLICK' | 'CDP_TYPE' | 'CDP_PRESS_KEY',
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    const resp = await browser.runtime.sendMessage({ type, payload }) as { ok?: boolean } | undefined;
+    return !!resp?.ok;
+  } catch {
+    return false;
+  }
+}
 
 function dbg(...args: unknown[]): void {
   if (DEBUG) swLog(...args);
@@ -225,11 +242,17 @@ export async function naturalClick(
     clientY: target.y,
   };
 
-  element.dispatchEvent(new MouseEvent('mousedown', eventInit));
-  await delay(40 + Math.random() * 60);
-  element.dispatchEvent(new MouseEvent('mouseup', eventInit));
+  // Try CDP first for trusted (`isTrusted: true`) events. Falls back
+  // to synthetic dispatch if CDP is unavailable (pref off, permission
+  // missing, or sendCommand failed).
+  const cdpOk = await sendCdpRequest('CDP_CLICK', { x: target.x, y: target.y });
   pulseCursor();
-  element.dispatchEvent(new MouseEvent('click', eventInit));
+  if (!cdpOk) {
+    element.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    await delay(40 + Math.random() * 60);
+    element.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    element.dispatchEvent(new MouseEvent('click', eventInit));
+  }
 }
 
 export function keyboardEventInit(ch: string): KeyboardEventInit {
@@ -285,7 +308,17 @@ export async function typeText(
     return;
   }
 
-  // ── existing atomic-commit path (mostly unchanged) ──
+  // Try CDP first. Input.insertText fires keydown/input/keyup with
+  // isTrusted: true and avoids us triggering the synthetic native value
+  // setter (whose input event would carry isTrusted: false and tip off
+  // anti-bot scorers regardless of what we do afterwards).
+  const cdpOk = await sendCdpRequest('CDP_TYPE', { text });
+  if (cdpOk) return;
+
+  // Synthetic fallback (existing atomic-commit behaviour) — only runs
+  // when CDP is unavailable (pref off, permission missing, or sendCommand
+  // failed). Page sees value-set + input + change synchronously, then
+  // cosmetic per-char keystrokes that exercise key-event listeners.
   const nativeValueSetter =
     Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
     ?? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
@@ -298,9 +331,6 @@ export async function typeText(
   element.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: text, bubbles: true }));
   element.dispatchEvent(new Event('change', { bubbles: true }));
 
-  // Per-char keystrokes (cosmetic — value already committed). Use full
-  // keyboard event init and inter-word pause for consistency with the
-  // visible path and against detectors that compare key-event fields.
   for (let i = 0; i < text.length; i++) {
     if (i > 0 && text[i - 1] === ' ') {
       await delay(180 + Math.random() * 270);
@@ -468,6 +498,10 @@ async function clearInputVisible(element: HTMLInputElement | HTMLTextAreaElement
 export async function pressEnter(element: HTMLElement): Promise<void> {
   if (!element) return;
 
+  const cdpOk = await sendCdpRequest('CDP_PRESS_KEY', { key: 'Enter' });
+  if (cdpOk) return;
+
+  // Synthetic fallback (current behaviour).
   const keyInit: KeyboardEventInit = {
     key: 'Enter',
     code: 'Enter',
@@ -491,6 +525,11 @@ export async function smoothScrollToElement(element: HTMLElement): Promise<void>
   const viewportHeight = window.innerHeight;
   if (rect.top >= 0 && rect.bottom <= viewportHeight) return;
 
+  if (!HUMANIZE_SCROLL) {
+    element.scrollIntoView({ block: 'start', behavior: 'auto' });
+    return;
+  }
+
   const targetY = window.scrollY + rect.top - viewportHeight / 3;
   const startY = window.scrollY;
   const distance = targetY - startY;
@@ -508,6 +547,7 @@ export async function smoothScrollToElement(element: HTMLElement): Promise<void>
 }
 
 export async function humanSkimScroll(): Promise<void> {
+  if (!HUMANIZE_SCROLL) return;
   const skimSteps = 2 + Math.floor(Math.random() * 3); // 2–4 bursts
   for (let s = 0; s < skimSteps; s++) {
     const viewport = window.innerHeight || 800;
@@ -552,8 +592,10 @@ export async function scrollToBottom(
     opts = onProgressOrOpts;
   }
 
-  const incrementVh = opts?.incrementVh ?? 0.4;
-  const baseDelay = opts?.delayMs ?? 700;
+  // Fast mode: bigger steps + tiny delays. Lazy-loaded sites may load less
+  // content; that's the explicit trade-off advertised in the toggle copy.
+  const incrementVh = HUMANIZE_SCROLL ? (opts?.incrementVh ?? 0.4) : 1.0;
+  const baseDelay = HUMANIZE_SCROLL ? (opts?.delayMs ?? 700) : 50;
 
   let lastHeight = document.body.scrollHeight;
   let attempts = 0;
@@ -571,7 +613,7 @@ export async function scrollToBottom(
 
     const newHeight = document.body.scrollHeight;
     if (newHeight === lastHeight) {
-      await delay(1500 + Math.random() * 1000);
+      await delay(HUMANIZE_SCROLL ? 1500 + Math.random() * 1000 : 100);
       if (document.body.scrollHeight === lastHeight) break;
     }
     lastHeight = document.body.scrollHeight;
