@@ -36,6 +36,10 @@ export default function APISettingsView() {
   const batchParallelCap = useSettingsStore((s) => s.batchParallelCap);
   const setBatchPreflightQuietMs = useSettingsStore((s) => s.setBatchPreflightQuietMs);
   const setBatchParallelCap = useSettingsStore((s) => s.setBatchParallelCap);
+  const notifyOnPause = useSettingsStore((s) => s.notifyOnPause);
+  const notifyOnBatchComplete = useSettingsStore((s) => s.notifyOnBatchComplete);
+  const setNotifyOnPause = useSettingsStore((s) => s.setNotifyOnPause);
+  const setNotifyOnBatchComplete = useSettingsStore((s) => s.setNotifyOnBatchComplete);
 
   const [preflightQuietDraft, setPreflightQuietDraft] = useState(String(batchPreflightQuietMs));
   const [parallelCapDraft, setParallelCapDraft] = useState(String(batchParallelCap));
@@ -101,6 +105,22 @@ export default function APISettingsView() {
       showToast("Couldn't save preference.", 'error');
       setClearVisible(!next);
     }
+  };
+
+  const toggleNotifyOnPause = (next: boolean): void => {
+    setNotifyOnPause(next);
+    browser.runtime.sendMessage({
+      type: 'SET_BATCH_SETTINGS',
+      payload: { notifyOnPause: next },
+    }).catch(() => { /* SW asleep — best effort */ });
+  };
+
+  const toggleNotifyOnBatchComplete = (next: boolean): void => {
+    setNotifyOnBatchComplete(next);
+    browser.runtime.sendMessage({
+      type: 'SET_BATCH_SETTINGS',
+      payload: { notifyOnBatchComplete: next },
+    }).catch(() => { /* SW asleep — best effort */ });
   };
 
   const urlValidation = validateBackendUrl(urlDraft);
@@ -325,6 +345,30 @@ export default function APISettingsView() {
         <p className="form-hint">
           How long (in milliseconds) the scraper waits with no detection before marking a task ready. Default 5000ms is right for most sites.
         </p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={notifyOnPause}
+            onChange={(e) => toggleNotifyOnPause(e.target.checked)}
+          />
+          Notify when a scrape pauses for action
+        </label>
+        <p className="form-hint">Shows a Chrome notification when a draining task needs your attention and you're not on its window.</p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={notifyOnBatchComplete}
+            onChange={(e) => toggleNotifyOnBatchComplete(e.target.checked)}
+          />
+          Notify when a batch finishes
+        </label>
+        <p className="form-hint">Shows a Chrome notification with the result count when a batch ends.</p>
       </div>
 
       <div className="form-group">

@@ -10,6 +10,13 @@ import {
 } from '../background/flowEventToHubPayload';
 import { Scheduler, type PersistedActiveRecord } from '../background/scheduler';
 import { originOf } from '../background/originOf';
+import {
+  notifyTaskPaused,
+  notifyBatchComplete,
+  isTaskNotification,
+  isBatchNotification,
+  taskIdFromNotificationId,
+} from '../background/notifications';
 
 export default defineBackground(() => {
   ensureDebugInit();
@@ -64,6 +71,20 @@ export default defineBackground(() => {
   type SignalRConfig = { serverUrl: string; token: string; clientId: string; version: string };
   let signalrConfig: SignalRConfig | null = null;
 
+  // PR6 — notification toggles. Hydrated from chrome.storage.local on SW
+  // start; updated via SET_BATCH_SETTINGS messages from sidepanel.
+  let notifyOnPause = true;
+  let notifyOnBatchComplete = true;
+
+  // PR6 — accumulated stats for the current batch. Reset on transition to
+  // idle (after firing the batch-complete notification). Counts FLOW_COMPLETE
+  // as succeeded; FLOW_ERROR and tab-closed-mid-task as failed.
+  const batchStats = { total: 0, succeeded: 0, failed: 0 };
+
+  // PR6 — track scheduler phase to detect drain→idle transitions for the
+  // batch-complete notification. Updated after every endTask call.
+  let prevSchedulerPhase: import('../background/scheduler').BatchPhase = 'idle';
+
   function persistActive(): void {
     chrome.storage.session.set({ activeRemoteTasks: scheduler.serializeActive() }).catch(() => {});
   }
@@ -81,6 +102,13 @@ export default defineBackground(() => {
     if (Array.isArray(data.recentRemoteTasks)) {
       scheduler.setRecent(data.recentRemoteTasks as QueueTask[]);
     }
+  }).catch(() => {});
+
+  // PR6 — hydrate notification toggles from chrome.storage.local. Defaults
+  // (true/true) apply if storage is empty.
+  chrome.storage.local.get(['notifyOnPause', 'notifyOnBatchComplete']).then((data: Record<string, unknown>) => {
+    if (typeof data.notifyOnPause === 'boolean') notifyOnPause = data.notifyOnPause;
+    if (typeof data.notifyOnBatchComplete === 'boolean') notifyOnBatchComplete = data.notifyOnBatchComplete;
   }).catch(() => {});
 
   // One-shot cleanup of the pre-PR2 singular key. chrome.storage.session is
@@ -294,6 +322,23 @@ export default defineBackground(() => {
     persistActive();
     persistRecent();
 
+    // PR6 — accumulate batch stats for the eventual batch-complete notification.
+    batchStats.total++;
+    if (completedStatus === 'completed') batchStats.succeeded++;
+    else batchStats.failed++;
+
+    // PR6 — detect batch-complete (transition to idle). Fire notification + reset.
+    const phaseAfter = scheduler.getPhase();
+    if (phaseAfter === 'idle' && prevSchedulerPhase !== 'idle' && batchStats.total > 0) {
+      if (notifyOnBatchComplete) {
+        notifyBatchComplete({ ...batchStats });
+      }
+      batchStats.total = 0;
+      batchStats.succeeded = 0;
+      batchStats.failed = 0;
+    }
+    prevSchedulerPhase = phaseAfter;
+
     const closingWindowId = closing.windowId;
     const closingTaskId = closing.task.id;
     isDebugMode().then((debug) => {
@@ -370,6 +415,20 @@ export default defineBackground(() => {
         };
         const hubPayload = mapFlowPaused(ctx, payload as unknown as FlowPausedPayload);
         relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
+
+        // PR6 — fire a Chrome notification only when:
+        //   - notifyOnPause toggle is on
+        //   - scheduler is in drain phase (mid-drain re-auth, not preflight)
+        //   - the focused window is NOT this task's window
+        if (notifyOnPause && scheduler.getPhase() === 'drain') {
+          const target = record;
+          chrome.windows.getLastFocused().then((focusedWindow) => {
+            if (!focusedWindow || focusedWindow.id !== target.windowId) {
+              const msg = flowPayload.message ?? 'Action needed in your browser.';
+              notifyTaskPaused(target, msg);
+            }
+          }).catch(() => { /* getLastFocused failed — skip notification */ });
+        }
         return;
       }
     }
@@ -453,15 +512,28 @@ export default defineBackground(() => {
     }
 
     if (type === 'SET_BATCH_SETTINGS') {
-      const p = (message.payload ?? {}) as { drainParallelCap?: number; preflightQuietMs?: number };
+      const p = (message.payload ?? {}) as {
+        drainParallelCap?: number;
+        preflightQuietMs?: number;
+        notifyOnPause?: boolean;
+        notifyOnBatchComplete?: boolean;
+      };
       if (typeof p.drainParallelCap === 'number') {
         scheduler.setDrainParallelCap(p.drainParallelCap);
         console.warn('[SW] batch settings | drainParallelCap:', p.drainParallelCap);
       }
-      // preflightQuietMs is stored but not consumed in PR5 — content script
-      // still uses the constant. Wiring deferred.
       if (typeof p.preflightQuietMs === 'number') {
         chrome.storage.local.set({ batchPreflightQuietMs: p.preflightQuietMs }).catch(() => {});
+      }
+      if (typeof p.notifyOnPause === 'boolean') {
+        notifyOnPause = p.notifyOnPause;
+        chrome.storage.local.set({ notifyOnPause }).catch(() => {});
+        console.warn('[SW] batch settings | notifyOnPause:', notifyOnPause);
+      }
+      if (typeof p.notifyOnBatchComplete === 'boolean') {
+        notifyOnBatchComplete = p.notifyOnBatchComplete;
+        chrome.storage.local.set({ notifyOnBatchComplete }).catch(() => {});
+        console.warn('[SW] batch settings | notifyOnBatchComplete:', notifyOnBatchComplete);
       }
       return;
     }
@@ -815,4 +887,29 @@ export default defineBackground(() => {
       }
     }
   });
+
+  // PR6 — notification click routing. Wrapped in try/catch because some
+  // browsers may not have chrome.notifications even with the permission set.
+  try {
+    chrome.notifications.onClicked.addListener((id) => {
+      if (isTaskNotification(id)) {
+        const taskId = taskIdFromNotificationId(id);
+        if (taskId) {
+          const target = scheduler.getActiveTask(taskId);
+          if (target) {
+            chrome.windows.update(target.windowId, { focused: true, state: 'normal' })
+              .catch((err: Error) => console.warn('[notifications] focus failed:', err.message));
+          }
+        }
+        chrome.notifications.clear(id);
+        return;
+      }
+      if (isBatchNotification(id)) {
+        chrome.notifications.clear(id);
+        return;
+      }
+    });
+  } catch (err) {
+    console.warn('[notifications] onClicked listener registration failed:', (err as Error).message);
+  }
 });

@@ -22,6 +22,9 @@ interface SettingsState {
   // src/background/originGate.ts. SW reads via message in PR5; PR4 is
   // hardcoded to the default in the scheduler.
   batchParallelCap: number;
+  // PR6 — notification toggles. Defaults true.
+  notifyOnPause: boolean;
+  notifyOnBatchComplete: boolean;
 
   setConnection: (url: string, token: string) => void;
   setConnected: (connected: boolean, error?: string) => void;
@@ -32,6 +35,8 @@ interface SettingsState {
   setConnectionStatus: (status: ConnectionStatus, error?: string) => void;
   setBatchPreflightQuietMs: (ms: number) => void;
   setBatchParallelCap: (cap: number) => void;
+  setNotifyOnPause: (v: boolean) => void;
+  setNotifyOnBatchComplete: (v: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -47,6 +52,8 @@ export const useSettingsStore = create<SettingsState>()(
       connectionStatus: 'idle',
       batchPreflightQuietMs: 5000,
       batchParallelCap: 4,
+      notifyOnPause: true,
+      notifyOnBatchComplete: true,
 
       setConnection: (serverUrl, jwtToken) =>
         set({ serverUrl, jwtToken, connected: false, lastConnectionError: null }),
@@ -73,6 +80,10 @@ export const useSettingsStore = create<SettingsState>()(
         set({ batchPreflightQuietMs }),
       setBatchParallelCap: (batchParallelCap) =>
         set({ batchParallelCap }),
+      setNotifyOnPause: (notifyOnPause) =>
+        set({ notifyOnPause }),
+      setNotifyOnBatchComplete: (notifyOnBatchComplete) =>
+        set({ notifyOnBatchComplete }),
     }),
     {
       name: 'bb-settings',
@@ -85,6 +96,8 @@ export const useSettingsStore = create<SettingsState>()(
         workerName: s.workerName,
         batchPreflightQuietMs: s.batchPreflightQuietMs,
         batchParallelCap: s.batchParallelCap,
+        notifyOnPause: s.notifyOnPause,
+        notifyOnBatchComplete: s.notifyOnBatchComplete,
       }),
     },
   ),
