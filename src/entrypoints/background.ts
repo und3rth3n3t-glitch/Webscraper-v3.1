@@ -42,6 +42,17 @@ export default defineBackground(() => {
       // matches HEAD's defensive logging pattern.
       startRemoteTask(task).catch((err) => console.error('[SW] startRemoteTask failed:', err));
     },
+    broadcastResumeForDrain: (records) => {
+      for (const r of records) {
+        console.warn('[SW] RESUME_FOR_DRAIN | taskId:', r.task.id, '| tabId:', r.tabId, '| origin:', r.origin);
+        chrome.tabs.sendMessage(r.tabId, {
+          type: 'RESUME_FOR_DRAIN',
+          payload: { taskId: r.task.id },
+        }).catch((err: Error) => {
+          console.error('[SW] RESUME_FOR_DRAIN send failed | taskId:', r.task.id, '| err:', err.message);
+        });
+      }
+    },
   });
 
   let activePauseState: {
@@ -445,7 +456,24 @@ export default defineBackground(() => {
 
     if (type === 'TASK_RECEIVED') {
       const task = message.payload as QueueTask;
-      scheduler.enqueueTask(task);
+      // Resolve origin async so the same-origin gate has data to work with
+      // during drain. Tasks without a resolvable URL get null origin and
+      // are treated as ungated.
+      void (async () => {
+        let origin: string | null = null;
+        try {
+          if (task.inlineConfig?.url) {
+            origin = originOf(task.inlineConfig.url);
+          } else {
+            const localConfigs = await getAllConfigs();
+            const cfg = localConfigs.find((c) => c.id === task.configId);
+            if (cfg?.url) origin = originOf(cfg.url);
+          }
+        } catch {
+          // resolution failure → null origin, no gate
+        }
+        scheduler.enqueueTask(task, origin);
+      })();
       return;
     }
 
@@ -455,8 +483,8 @@ export default defineBackground(() => {
       const { taskId } = (message.payload ?? {}) as { taskId?: string };
       const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
       if (target) {
-        browser.tabs.sendMessage(target.tabId, { type: 'RESUME_AFTER_CLOUDFLARE' })
-          .catch((err) => console.error('[SW] RESUME_AFTER_CLOUDFLARE failed:', err));
+        browser.tabs.sendMessage(target.tabId, { type: 'RESUME_AFTER_PAUSE' })
+          .catch((err) => console.error('[SW] RESUME_AFTER_PAUSE failed:', err));
         activePauseState = null;
       }
       return;
@@ -469,7 +497,7 @@ export default defineBackground(() => {
     // to the routing block, which forwards to the live content script (if one
     // is still listening). If the content script is dead (page navigated), the
     // drained continuation re-delivers EXECUTE_FLOW.
-    if (type === 'RESUME_AFTER_PAUSE' || type === 'RESUME_AFTER_CLOUDFLARE') {
+    if (type === 'RESUME_AFTER_PAUSE') {
       const wasPaused = activePauseState !== null;
       const resumePayload = (message.payload ?? {}) as { markAsFalseAlarm?: boolean };
 
@@ -607,11 +635,13 @@ export default defineBackground(() => {
     if (contentToSidepanel.includes(type)) {
       if (type === 'FLOW_PREFLIGHT_READY') {
         const p = (message.payload ?? {}) as { taskId?: string };
-        const record = p.taskId ? scheduler.getActiveTask(p.taskId) : undefined;
-        console.warn('[SW] FLOW_PREFLIGHT_READY | taskId:', p.taskId, '| recordKnown:', !!record);
-        // PR4 will transition the task in the scheduler here. PR3 just logs
-        // and falls through to the relay — sidepanel can already subscribe
-        // (PR5) without further wiring.
+        if (p.taskId) {
+          console.warn('[SW] FLOW_PREFLIGHT_READY | taskId:', p.taskId, '| phaseBefore:', scheduler.getPhase());
+          scheduler.markPreflightReady(p.taskId);
+          console.warn('[SW] FLOW_PREFLIGHT_READY | taskId:', p.taskId, '| phaseAfter:', scheduler.getPhase());
+        } else {
+          console.warn('[SW] FLOW_PREFLIGHT_READY ignored — no taskId');
+        }
       }
       if (type === 'FLOW_RESUMED') {
         console.warn('[SW] FLOW_RESUMED relayed | activeTaskId:', scheduler.getFirstActive()?.task.id);
@@ -644,7 +674,7 @@ export default defineBackground(() => {
 
     const sidepanelToContent = [
       'PING', 'START_PICKER', 'CANCEL_PICKER',
-      'EXECUTE_FLOW', 'ABORT_FLOW', 'RESUME_AFTER_CLOUDFLARE', 'RESUME_AFTER_PAUSE',
+      'EXECUTE_FLOW', 'ABORT_FLOW', 'RESUME_AFTER_PAUSE',
       'HIGHLIGHT_ELEMENT', 'UNHIGHLIGHT_ELEMENT', 'GET_PAGE_INFO',
       'SCAN_ELEMENTS', 'SCAN_ABORT',
     ];

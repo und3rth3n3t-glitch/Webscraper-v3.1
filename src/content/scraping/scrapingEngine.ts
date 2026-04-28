@@ -61,6 +61,11 @@ let flowRunning = false;
 // or when the active flow has no taskId (sidepanel-only mode).
 let activePreflightTimer: PreflightTimer | null = null;
 
+// PR4 — set true once SW has dispatched RESUME_FOR_DRAIN for the current
+// flow's taskId. Cleared at flow start. Module-scope so the drain pause
+// checkpoint can short-circuit subsequent iterations.
+let drainResumed = false;
+
 // Runtime-toggleable: when true, scrape output includes verbose diagnostic
 // fields (saved-descriptor dumps on chart-resolution failures, etc.). The
 // initial value is loaded from chrome.storage.local prefs (key set by the
@@ -164,6 +169,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     });
     activePreflightTimer.arm();
     swLog('[preflightTimer] armed | taskId:', taskId, '| durationMs:', PREFLIGHT_QUIET_MS);
+    drainResumed = false;
   }
 
   const startTime = Date.now();
@@ -222,6 +228,11 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     for (let i = startTermIndex; i < terms.length; i++) {
       const term = terms[i];
       checkAbort();
+
+      // PR4 — pause for drain (batch-mode only; no-op otherwise). Placed
+      // at top of iteration so setup runs to completion first; pause is
+      // bounded by at most one in-flight iteration.
+      await maybePauseForDrain(taskId);
 
       sendProgress({ phase: 'loop', termIndex: i, stepLabel: '', status: 'running', taskId });
       swLog('[executeFlow] iter START | taskId:', taskId, '| termIndex:', i, '| term:', term, '| url:', window.location.href);
@@ -439,8 +450,7 @@ function waitForResumeSignal(): Promise<void> {
   return new Promise((resolve) => {
     const handler = (msg: unknown): void => {
       const t = (msg as Record<string, unknown>)?.type;
-      // Accept both new MessageType.RESUME_AFTER_PAUSE and legacy RESUME_AFTER_CLOUDFLARE
-      if (t === MessageType.RESUME_AFTER_PAUSE || t === 'RESUME_AFTER_CLOUDFLARE') {
+      if (t === MessageType.RESUME_AFTER_PAUSE) {
         swLog('[waitForResumeSignal] resume received | type:', t);
         browser.runtime.onMessage.removeListener(handler);
         resolve();
@@ -448,6 +458,34 @@ function waitForResumeSignal(): Promise<void> {
     };
     browser.runtime.onMessage.addListener(handler);
   });
+}
+
+function waitForResumeForDrain(taskId: string): Promise<void> {
+  swLog('[waitForResumeForDrain] arming | taskId:', taskId);
+  return new Promise((resolve) => {
+    const handler = (msg: unknown): void => {
+      const m = msg as { type?: string; payload?: { taskId?: string } } | null;
+      if (m?.type !== MessageType.RESUME_FOR_DRAIN) return;
+      if (m.payload?.taskId !== taskId) return;
+      swLog('[waitForResumeForDrain] resumed | taskId:', taskId);
+      browser.runtime.onMessage.removeListener(handler);
+      resolve();
+    };
+    browser.runtime.onMessage.addListener(handler);
+  });
+}
+
+// Pause-for-drain checkpoint. No-op for sidepanel-only flows (no taskId),
+// for flows whose preflight timer hasn't fired yet, and for flows that
+// have already resumed once. Called at the top of every search-term
+// iteration in batch mode — not mid-step.
+async function maybePauseForDrain(taskId: string | undefined): Promise<void> {
+  if (!taskId) return;
+  if (drainResumed) return;
+  if (!activePreflightTimer?.isReady()) return;
+  swLog('[maybePauseForDrain] awaiting RESUME_FOR_DRAIN | taskId:', taskId);
+  await waitForResumeForDrain(taskId);
+  drainResumed = true;
 }
 
 function messageForTrigger(trigger: DetectionTrigger): string {
