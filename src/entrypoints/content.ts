@@ -96,6 +96,8 @@ export default defineContentScript({
       startTermIndex?: number;
       startLoopStepIndex?: number;
       previousIterations?: [];
+      drainResumed?: boolean;
+      paginationContinuation?: import('../content/scraping/paginationHandler').PaginationContinuation;
     };
 
     // Messages that must only run in the top frame. Without this guard,
@@ -152,6 +154,8 @@ export default defineContentScript({
             startTermIndex: fp.startTermIndex ?? 0,
             startLoopStepIndex: fp.startLoopStepIndex ?? 0,
             previousIterations: fp.previousIterations ?? [],
+            drainResumed: fp.drainResumed ?? false,
+            paginationContinuation: fp.paginationContinuation,
           })
             .then((result) => {
               if (result.guardBlocked) {

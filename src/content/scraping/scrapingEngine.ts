@@ -24,7 +24,7 @@ import { extractChartData } from '../extraction/chartExtractor';
 import { shapeTable, shapeChart } from '../shaping';
 import type { WireOutput, WireIteration } from '../shaping';
 import { slugify, disambiguate } from '../../utils/slugify';
-import { paginatePages, paginateElement } from './paginationHandler';
+import { paginatePages, paginateElement, type PaginationContinuation } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { swLog } from '../../utils/swLog';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
@@ -163,6 +163,12 @@ export interface ExecuteFlowParams {
   startTermIndex?: number;
   startLoopStepIndex?: number;
   previousIterations?: WireIteration[];
+  // PR-Bot1-fix — propagated by SW so a continuation re-delivery (page
+  // navigated mid-flow → fresh content-script context) can rehydrate
+  // its drain state instead of resetting and waiting forever for a
+  // RESUME_FOR_DRAIN that already happened in the previous context.
+  drainResumed?: boolean;
+  paginationContinuation?: PaginationContinuation;
 }
 
 export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingResult> {
@@ -174,6 +180,8 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     startTermIndex = 0,
     startLoopStepIndex = 0,
     previousIterations = [],
+    drainResumed: paramDrainResumed = false,
+    paginationContinuation,
   } = params;
 
   swLog('[executeFlow] called | taskId:', taskId, '| flowRunning:', flowRunning, '| searchTerms:', searchTerms, '| startTermIndex:', startTermIndex, '| startLoopStepIndex:', startLoopStepIndex, '| previousIterations.length:', previousIterations.length);
@@ -206,9 +214,14 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       },
     });
     activePreflightTimer.arm();
-    swLog('[preflightTimer] armed | taskId:', taskId, '| durationMs:', PREFLIGHT_QUIET_MS);
-    drainResumed = false;
-    drainResumedReceived = false;
+    swLog('[preflightTimer] armed | taskId:', taskId, '| durationMs:', PREFLIGHT_QUIET_MS, '| drainResumed:', paramDrainResumed);
+    // Hydrate from SW. After a continuation (page navigated, new
+    // content-script context), SW's scheduler.getActiveTask(taskId)
+    // is the source of truth for whether this task has been drained.
+    // We CANNOT reset to false unconditionally — that would re-pause
+    // the task at iter N+1 after every navigation.
+    drainResumed = paramDrainResumed;
+    drainResumedReceived = paramDrainResumed;
     drainResumedResolver = null;
   }
 
@@ -312,6 +325,51 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
           sendProgress({ phase: 'loop', termIndex: i, stepLabel: step.label, status: 'running', taskId });
           swLog('[executeFlow] step START | taskId:', taskId, '| termIndex:', i, '| stepIndex:', si, '| type:', step.type, '| label:', step.label, '| url:', window.location.href);
 
+          // Pagination resume: if SW re-delivered EXECUTE_FLOW with a
+          // paginationContinuation that targets this exact (term, step),
+          // skip the normal step execution and call the resume handler.
+          // The handler does its own scrape + maybe-click-next, registers
+          // a fresh continuation if more pages are needed, and either
+          // hangs (cross-nav) or returns finished:true with merged pages.
+          //
+          // If the continuation references a different (term, step) — e.g.
+          // user edited the config and step layout shifted — fall through
+          // to normal execution.
+          if (
+            paginationContinuation
+            && paginationContinuation.termIndex === i
+            && paginationContinuation.stepIndex === si
+            && step.type === 'scrape'
+            && (step as ScrapeStep).options.paginate
+          ) {
+            try {
+              const opts = (step as ScrapeStep).options;
+              const ctx: ScrapeContext = {
+                config,
+                searchTerms,
+                taskId,
+                termIndex: i,
+                stepIndex: si,
+                previousIterations: result.iterations,
+              };
+              const onProgress = (msg: string): void => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId });
+
+              const resumed = await runPaginationLoop(opts, ctx, paginationContinuation.pages, onProgress, afk);
+
+              // runPaginationLoop only returns when finished:true. (When the
+              // click navigates, paginatePages never returns and we resume
+              // in a fresh content-script context via continuation.)
+              const stepOutput: WireOutput = { kind: 'raw', data: resumed };
+              Object.assign(iterOutputs, { page: stepOutput });
+              swLog('[executeFlow] pagination resume done | taskId:', taskId, '| stepIndex:', si, '| pagesScraped:', resumed.pagesScraped);
+              continue; // skip the rest of this step iteration
+            } catch (err) {
+              const e = err as Error;
+              swLog('[executeFlow] pagination resume failed — falling back to normal step | taskId:', taskId, '| err:', e.message);
+              // Fall through to normal step execution as a safety net.
+            }
+          }
+
           const isNavigating = NAVIGATING_STEP_TYPES.has(step.type);
 
           if (isNavigating) {
@@ -334,6 +392,15 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
           const urlBeforeStep = window.location.href;
           let retried = false;
 
+          const scrapeCtx: ScrapeContext = {
+            config,
+            searchTerms,
+            taskId,
+            termIndex: i,
+            stepIndex: si,
+            previousIterations: result.iterations,
+          };
+
           try {
             // eslint-disable-next-line no-constant-condition
             while (true) {
@@ -345,6 +412,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                   (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
                   afk,
                   taskId,
+                  scrapeCtx,
                 );
                 break; // step succeeded — exit retry loop
               } catch (stepErr) {
@@ -695,6 +763,7 @@ async function executeStep(
   onProgress: OnProgress,
   afk: boolean,
   taskId?: string,
+  ctx?: ScrapeContext,
 ): Promise<Record<string, unknown> | null> {
   if (step.condition) {
     const passed = evaluateCondition(step.condition);
@@ -714,7 +783,7 @@ async function executeStep(
     case 'goBack':
       return executeGoBack(step, onProgress);
     case 'scrape':
-      return executeScrape(step, onProgress, afk);
+      return executeScrape(step, onProgress, afk, ctx);
     case 'selectEach':
       return executeSelectEach(step, onProgress, afk);
     case 'captureApiCalls':
@@ -930,6 +999,7 @@ async function executeScrape(
   step: ScrapeStep,
   onProgress: OnProgress,
   afk: boolean,
+  ctx?: ScrapeContext,
 ): Promise<Record<string, WireOutput>> {
   const opts = step.options;
   const outputs: Record<string, WireOutput> = {};
@@ -937,7 +1007,7 @@ async function executeScrape(
 
   if (opts.mode === 'wholePage') {
     onProgress?.('Scraping whole page...');
-    const pageData = await scrapeWholePage(opts, onProgress, afk);
+    const pageData = await scrapeWholePage(opts, onProgress, afk, ctx);
     outputs['page'] = { kind: 'raw', data: pageData };
   } else {
     const usedKeys = new Set<string>();
@@ -1075,10 +1145,85 @@ async function executeNavigateTo(
 
 // â”€â”€ Page-level scraping â”€â”€
 
+interface ScrapeContext {
+  config: ScraperConfig;
+  searchTerms: string[];
+  taskId?: string;
+  termIndex: number;
+  stepIndex: number;
+  previousIterations: WireIteration[];
+}
+
+// Shared loop used by both initial entry (scrapeWholePage) and the
+// post-navigation resume entry (called from the step-loop resume branch).
+// Each iteration calls paginatePages which scrapes the current page and
+// EITHER returns finished (cap reached / no next / disabled) OR clicks
+// next. If the click navigates, the JS realm dies — we never return from
+// paginatePages, the engine resumes via continuation. If the click
+// produced an in-page change, paginatePages returns finished:false and
+// we loop again (re-scrolling/expanding the updated content).
+//
+// Returns the final scraped output. ONLY returns when finished:true.
+async function runPaginationLoop(
+  opts: ScrapeStep['options'],
+  ctx: ScrapeContext,
+  startingPages: PageContent[],
+  onProgress: (msg: string) => void,
+  afk: boolean,
+): Promise<{ content: ReturnType<typeof mergePages>; pagesScraped: number }> {
+  let pages: PageContent[] = startingPages;
+  let firstIteration = true;
+
+  while (true) {
+    // On every iteration AFTER the first, do scroll/expand prep (the
+    // initial-entry caller already prepped the page-1 DOM). On resume
+    // entry from a continuation, the first iteration ALSO needs prep
+    // because we're on a freshly-loaded post-navigation page — caller
+    // sets firstIteration=false in that case via `runPaginationLoop`'s
+    // `startingPages` being non-empty.
+    const needsPrep = !firstIteration || pages.length > 0;
+    if (needsPrep) {
+      if (opts.scrollToBottom) {
+        onProgress('Scrolling to load all content...');
+        await scrollToBottom(undefined, { incrementVh: opts.scrollIncrementVh, delayMs: opts.scrollDelayMs });
+      }
+      if (opts.expandHidden) {
+        onProgress('Expanding hidden sections...');
+        await expandHiddenElements({ delayMs: opts.expandDelayMs });
+      }
+    }
+    firstIteration = false;
+
+    const result = await paginatePages({
+      termIndex: ctx.termIndex,
+      stepIndex: ctx.stepIndex,
+      paginationSelector: opts.paginationSelector!,
+      pageCountTarget: opts.pageCount || 0,
+      paginationDelayMs: opts.paginationDelayMs,
+      config: ctx.config,
+      searchTerms: ctx.searchTerms,
+      taskId: ctx.taskId,
+      previousIterations: ctx.previousIterations,
+      resumedPages: pages,
+      resumedPagesScraped: pages.length,
+      extractCurrentPage: () => extractPageBlocks(),
+      onProgress,
+      afk,
+    });
+
+    pages = result.pages;
+    if (result.finished) break;
+    // In-page change — loop and re-scrape.
+  }
+
+  return { content: mergePages(pages), pagesScraped: pages.length };
+}
+
 async function scrapeWholePage(
   opts: ScrapeStep['options'],
   onProgress: OnProgress,
   afk: boolean,
+  ctx?: ScrapeContext,
 ): Promise<Record<string, unknown>> {
   // Brief pre-scrape skim — humans glance over a page before extracting.
   // Skipped when scrollToBottom is on (it does its own paging) or afk is on.
@@ -1098,24 +1243,13 @@ async function scrapeWholePage(
     await expandHiddenElements({ delayMs: opts.expandDelayMs });
   }
 
-  const pages: PageContent[] = [];
-
-  if (opts.paginate && opts.paginationSelector) {
-    pages.push(await extractPageBlocks());
-
-    const pagesScraped = await paginatePages({
-      paginationSelector: opts.paginationSelector,
-      pageCount: opts.pageCount || 0,
-      paginationDelayMs: opts.paginationDelayMs,
-      onPage: async () => {
-        if (opts.scrollToBottom) await scrollToBottom(undefined, { incrementVh: opts.scrollIncrementVh, delayMs: opts.scrollDelayMs });
-        pages.push(await extractPageBlocks());
-      },
-      onProgress,
-      afk,
-    });
-
-    return { content: mergePages(pages), pagesScraped };
+  if (opts.paginate && opts.paginationSelector && ctx) {
+    // Initial entry into the pagination state machine. runPaginationLoop
+    // calls paginatePages once per page; on cross-navigation click the
+    // function never returns (JS realm dies — engine resumes via
+    // continuation in a new context), and on in-page change the loop
+    // simply iterates again.
+    return await runPaginationLoop(opts, ctx, [], onProgress!, !!afk);
   }
 
   return { content: await extractPageBlocks(), pagesScraped: 1 };
