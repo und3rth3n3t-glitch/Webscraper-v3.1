@@ -19,7 +19,7 @@ interface QueueState {
   setTaskProgress: (taskId: string, progress: { stepLabel: string; termIndex?: number }) => void;
   completeTask: (taskId: string, result: TaskResult) => void;
   failTask: (taskId: string, error: string) => void;
-  pauseTask: (taskId: string, reason: QueueTask['pausedReason']) => void;
+  pauseTask: (taskId: string, info: import('../../types/signalr').TaskPauseInfo) => void;
   resumeTask: (taskId: string) => void;
   clearCompleted: () => void;
   clearPending: () => void;
@@ -82,17 +82,21 @@ export const useQueueStore = create<QueueState>((set) => ({
       return { tasks, currentTaskId: null, stats: recompute(tasks) };
     }),
 
-  pauseTask: (taskId, reason) =>
+  pauseTask: (taskId, info) =>
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId ? { ...t, status: 'paused' as const, pausedReason: reason } : t,
+        t.id === taskId
+          ? { ...t, status: 'paused' as const, pausedReason: info.reason, pause: info }
+          : t,
       ),
     })),
 
   resumeTask: (taskId) =>
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId ? { ...t, status: 'running' as const, pausedReason: undefined } : t,
+        t.id === taskId
+          ? { ...t, status: 'running' as const, pausedReason: undefined, pause: undefined }
+          : t,
       ),
     })),
 

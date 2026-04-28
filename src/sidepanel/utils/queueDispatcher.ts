@@ -1,5 +1,4 @@
 import { useQueueStore } from '../stores/queueStore';
-import { useUiStore } from '../stores/uiStore';
 import { onMessage } from './messageDispatcher';
 import { mergeProgress } from '../../utils/queueProgress';
 import type { QueueTask, TaskResult, QueueSnapshot } from '../../types/signalr';
@@ -61,20 +60,27 @@ export function startQueueDispatcher(): () => void {
   });
 
   const offPaused = onMessage('FLOW_PAUSED', (payload) => {
-    const p = payload as { taskId?: string; reason?: 'cloudflare' | 'awaitUserAction'; message?: string };
+    const p = payload as {
+      taskId?: string;
+      reason?: 'cloudflare' | 'awaitUserAction';
+      message?: string;
+      trigger?: import('../../types/messages').DetectionTrigger;
+      domain?: string;
+    };
     if (!p.taskId || (p.reason !== 'cloudflare' && p.reason !== 'awaitUserAction')) return;
-    useQueueStore.getState().pauseTask(p.taskId, p.reason);
-    if (p.reason === 'cloudflare') {
-      useUiStore.getState().setCloudflarePaused(true);
-    } else {
-      useUiStore.getState().setAwaitActionPaused({ message: p.message ?? 'Action needed in your browser.' });
-    }
+    useQueueStore.getState().pauseTask(p.taskId, {
+      reason: p.reason,
+      message: p.message,
+      trigger: p.trigger,
+      domain: p.domain,
+    });
   });
 
-  const offResumed = onMessage('FLOW_RESUMED', () => {
-    useUiStore.getState().setCloudflarePaused(false);
-    useUiStore.getState().setAwaitActionPaused(null);
-  });
+  // FLOW_RESUMED payload doesn't carry taskId in the current wire protocol;
+  // resume is driven by the user clicking PauseAlert, which calls
+  // queueStore.resumeTask(taskId) directly. This handler is now a no-op
+  // but is left registered to preserve the dispatcher contract.
+  const offResumed = onMessage('FLOW_RESUMED', () => { /* per-task resume done in PauseAlert */ });
 
   return () => {
     chrome.runtime.onMessage.removeListener(rawListener);

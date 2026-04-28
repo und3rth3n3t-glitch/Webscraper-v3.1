@@ -32,6 +32,14 @@ export default function APISettingsView() {
   const [tokenDraft, setTokenDraft] = useState('');
   const [workerNameDraft, setWorkerNameDraft] = useState(workerName);
   const [modeDraft, setModeDraft] = useState<'local' | 'queue'>(mode);
+  const batchPreflightQuietMs = useSettingsStore((s) => s.batchPreflightQuietMs);
+  const batchParallelCap = useSettingsStore((s) => s.batchParallelCap);
+  const setBatchPreflightQuietMs = useSettingsStore((s) => s.setBatchPreflightQuietMs);
+  const setBatchParallelCap = useSettingsStore((s) => s.setBatchParallelCap);
+
+  const [preflightQuietDraft, setPreflightQuietDraft] = useState(String(batchPreflightQuietMs));
+  const [parallelCapDraft, setParallelCapDraft] = useState(String(batchParallelCap));
+
   const [testing, setTesting] = useState(false);
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [mouseVisible, setMouseVisible] = useState(false);
@@ -130,6 +138,19 @@ export default function APISettingsView() {
       } else {
         await browser.runtime.sendMessage({ type: 'STOP_SIGNALR' });
       }
+
+      const quietMs = Number.parseInt(preflightQuietDraft, 10);
+      const cap = Number.parseInt(parallelCapDraft, 10);
+      if (Number.isFinite(quietMs) && quietMs >= 1000) setBatchPreflightQuietMs(quietMs);
+      if (Number.isFinite(cap) && cap >= 1 && cap <= 16) setBatchParallelCap(cap);
+
+      browser.runtime.sendMessage({
+        type: 'SET_BATCH_SETTINGS',
+        payload: {
+          drainParallelCap: Number.isFinite(cap) && cap >= 1 ? cap : batchParallelCap,
+          preflightQuietMs: Number.isFinite(quietMs) && quietMs >= 1000 ? quietMs : batchPreflightQuietMs,
+        },
+      }).catch(() => { /* SW may not be ready yet — non-fatal */ });
 
       showToast('Settings saved.', 'success');
     } catch {
@@ -273,6 +294,38 @@ export default function APISettingsView() {
           </button>
         </div>
       )}
+
+      <div className="form-group">
+        <label className="form-label">Parallel scrape windows</label>
+        <input
+          className="form-input"
+          type="number"
+          min={1}
+          max={16}
+          value={parallelCapDraft}
+          onChange={(e) => setParallelCapDraft(e.target.value)}
+          placeholder="4"
+        />
+        <p className="form-hint">
+          How many tasks run side-by-side once authentication is sorted. Bumping this above 4 can trip rate limits on busy sites.
+        </p>
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">Wait for page to settle</label>
+        <input
+          className="form-input"
+          type="number"
+          min={1000}
+          step={500}
+          value={preflightQuietDraft}
+          onChange={(e) => setPreflightQuietDraft(e.target.value)}
+          placeholder="5000"
+        />
+        <p className="form-hint">
+          How long (in milliseconds) the scraper waits with no detection before marking a task ready. Default 5000ms is right for most sites.
+        </p>
+      </div>
 
       <div className="form-group">
         <label className="form-check">

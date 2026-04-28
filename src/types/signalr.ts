@@ -1,5 +1,13 @@
 import type { WireIteration } from '../content/shaping/types';
 import type { DataMapping, ScraperConfig } from './config';
+import type { DetectionTrigger } from './messages';
+
+export interface TaskPauseInfo {
+  reason: 'cloudflare' | 'awaitUserAction';
+  message?: string;
+  trigger?: DetectionTrigger;
+  domain?: string;
+}
 
 export interface QueueTask {
   id: string;
@@ -11,7 +19,8 @@ export interface QueueTask {
   priority: number;
   createdAt: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
-  pausedReason?: 'cloudflare' | 'awaitUserAction';
+  pausedReason?: 'cloudflare' | 'awaitUserAction'; // kept for back-compat with persisted tasks; populated alongside `pause` for one release
+  pause?: TaskPauseInfo;                            // PR5 — per-task pause detail
   progress?: { stepLabel: string; termIndex?: number };
   result?: TaskResult;
   error?: string;

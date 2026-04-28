@@ -1,6 +1,5 @@
 import { useQueueStore } from '../stores/queueStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import { sendToContent } from '../utils/messaging';
 import type { QueueTask } from '../../types/signalr';
 
 function statusDot(status: QueueTask['status']): string {
@@ -25,7 +24,7 @@ function stepLine(task: QueueTask): string {
 }
 
 export default function QueueView() {
-  const { tasks, currentTaskId, stats, clearCompleted, clearPending, removeTask, resumeTask } = useQueueStore();
+  const { tasks, currentTaskId, stats, clearCompleted, clearPending, removeTask } = useQueueStore();
   const { connected, serverUrl, lastConnectionError } = useSettingsStore();
 
   const currentTask = tasks.find(t => t.id === currentTaskId);
@@ -39,15 +38,6 @@ export default function QueueView() {
     task.iterationLabel ?? (task.searchTerms.length > 0
       ? `${task.searchTerms.length} term${task.searchTerms.length !== 1 ? 's' : ''}`
       : null);
-
-  const handleResumePaused = async (task: QueueTask) => {
-    try {
-      await sendToContent('RESUME_AFTER_CLOUDFLARE');
-      resumeTask(task.id);
-    } catch {
-      // auto-resume will handle it
-    }
-  };
 
   return (
     <div className="view queue-view">
@@ -71,16 +61,11 @@ export default function QueueView() {
           <div className="card-header">
             <span className={statusDot(currentTask.status)} />
             <span className="card-title">{currentTask.configName}</span>
-            {currentTask.status === 'paused' && (
-              <button className="btn btn-ghost btn-sm" onClick={() => handleResumePaused(currentTask)}>
-                Resume
-              </button>
-            )}
           </div>
           <div className="card-body">
             <p className="text-sm text-light">
               {taskLabel(currentTask) ?? 'Batch task'}
-              {currentTask.status === 'paused' && ' — waiting for Cloudflare challenge'}
+              {currentTask.status === 'paused' && ' — paused, action needed in browser'}
             </p>
             {currentTask.status === 'running' && stepLine(currentTask) && (
               <span className="run-term-step">{stepLine(currentTask)}</span>

@@ -452,6 +452,20 @@ export default defineBackground(() => {
       return;
     }
 
+    if (type === 'SET_BATCH_SETTINGS') {
+      const p = (message.payload ?? {}) as { drainParallelCap?: number; preflightQuietMs?: number };
+      if (typeof p.drainParallelCap === 'number') {
+        scheduler.setDrainParallelCap(p.drainParallelCap);
+        console.warn('[SW] batch settings | drainParallelCap:', p.drainParallelCap);
+      }
+      // preflightQuietMs is stored but not consumed in PR5 — content script
+      // still uses the constant. Wiring deferred.
+      if (typeof p.preflightQuietMs === 'number') {
+        chrome.storage.local.set({ batchPreflightQuietMs: p.preflightQuietMs }).catch(() => {});
+      }
+      return;
+    }
+
     // ── Inbound queue task: start or queue it ──
 
     if (type === 'TASK_RECEIVED') {
@@ -499,13 +513,12 @@ export default defineBackground(() => {
     // drained continuation re-delivers EXECUTE_FLOW.
     if (type === 'RESUME_AFTER_PAUSE') {
       const wasPaused = activePauseState !== null;
-      const resumePayload = (message.payload ?? {}) as { markAsFalseAlarm?: boolean };
+      const resumePayload = (message.payload ?? {}) as { taskId?: string; markAsFalseAlarm?: boolean };
 
       // Capture false-alarm signal BEFORE clearing activePauseState.
       // Cloudflare cannot be marked as false alarm (UI doesn't expose the button).
       if (
         resumePayload.markAsFalseAlarm
-        && type === 'RESUME_AFTER_PAUSE'
         && activePauseState?.reason === 'awaitUserAction'
         && activePauseState?.trigger
         && activePauseState?.domain
@@ -521,8 +534,41 @@ export default defineBackground(() => {
       }
 
       activePauseState = null;
-      console.warn('[SW] sidepanel resume | type:', type, '| wasPaused:', wasPaused, '| markAsFalseAlarm:', resumePayload.markAsFalseAlarm);
+      console.warn('[SW] sidepanel resume | type:', type, '| taskId:', resumePayload.taskId, '| wasPaused:', wasPaused, '| markAsFalseAlarm:', resumePayload.markAsFalseAlarm);
 
+      // PR5 — per-task routing. If a taskId is present, route to that task's
+      // tab directly (bypasses active-tab assumption, supports multiple
+      // simultaneously paused tasks). Falls through to active-tab routing
+      // when taskId is absent (sidepanel-mode runs without a queue task).
+      if (resumePayload.taskId) {
+        const target = scheduler.getActiveTask(resumePayload.taskId);
+        if (target) {
+          browser.tabs.sendMessage(target.tabId, {
+            type: 'RESUME_AFTER_PAUSE',
+            payload: resumePayload,
+          }).catch((err: Error) => console.warn('[SW] per-task resume sendMessage failed:', err.message));
+
+          // Drain any held continuation for that specific tab (pause-driven nav).
+          const continuation = pendingContinuations.get(target.tabId);
+          if (continuation) {
+            pendingContinuations.delete(target.tabId);
+            console.warn('[SW] resume — draining held continuation | tabId:', target.tabId);
+            setTimeout(() => {
+              browser.tabs.sendMessage(target.tabId, { type: 'EXECUTE_FLOW', payload: continuation })
+                .then(() => console.warn('[SW] held continuation delivered | tabId:', target.tabId))
+                .catch((err: Error) => {
+                  console.warn('[SW] held continuation delivery failed | tabId:', target.tabId, '— re-registering | err:', err.message);
+                  pendingContinuations.set(target.tabId, continuation);
+                });
+            }, 300);
+          }
+          return; // handled — do not fall through to active-tab routing
+        }
+        console.warn('[SW] RESUME_AFTER_PAUSE — no active task for taskId:', resumePayload.taskId);
+        // No matching task — fall through to active-tab routing as a fallback.
+      }
+
+      // Legacy / sidepanel-mode path: route to active tab.
       browser.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
         const tabId = activeTab?.id;
         if (!tabId) return;
@@ -540,10 +586,7 @@ export default defineBackground(() => {
           }, 300);
         }
       }).catch(() => { /* ignore */ });
-
-      // Fall through to sidepanelToContent routing so the live content script
-      // (if any) also receives the resume signal and its waitForResumeSignal
-      // promise resolves.
+      // Fall through to sidepanelToContent routing for the live content script.
     }
 
     if (type === 'CANCEL_TASK') {

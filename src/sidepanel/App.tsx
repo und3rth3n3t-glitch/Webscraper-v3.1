@@ -10,8 +10,8 @@ import QueueView from './components/QueueView';
 import APISettingsView from './components/APISettingsView';
 import ConfirmDialog from './components/ConfirmDialog';
 import DomainBadge from './components/DomainBadge';
-import CloudflarePauseAlert from './components/CloudflarePauseAlert';
-import AwaitActionPauseAlert from './components/AwaitActionPauseAlert';
+import PauseAlert from './components/PauseAlert';
+import { useQueueStore } from './stores/queueStore';
 import { useUiStore } from './stores/uiStore';
 import { useConfigStore } from './stores/configStore';
 import { useSettingsStore } from './stores/settingsStore';
@@ -37,18 +37,6 @@ export default function App() {
         // (pullSharedConfigs, pushIfDirty) have it before the user visits Settings.
         const token = await getApiToken().catch(() => null);
         if (token) useSettingsStore.setState({ jwtToken: token });
-
-        const pauseRes = await browser.runtime.sendMessage({ type: 'GET_PAUSE_STATE' }).catch(() => null);
-        const ps = (pauseRes as { pauseState?: { reason: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string } } | null)?.pauseState;
-        if (ps?.reason === 'cloudflare') {
-          useUiStore.getState().setCloudflarePaused(true);
-        } else if (ps?.reason === 'awaitUserAction') {
-          useUiStore.getState().setAwaitActionPaused({
-            message: ps.message ?? 'Action needed in your browser.',
-            trigger: ps.trigger,
-            domain: ps.domain,
-          });
-        }
 
         if (status === 'idle' && mode === 'queue' && serverUrl && token) {
           await browser.runtime.sendMessage({
@@ -112,7 +100,7 @@ export default function App() {
   const saveAndSwitchTab = useUiStore((s) => s.saveAndSwitchTab);
   const discardAndSwitchTab = useUiStore((s) => s.discardAndSwitchTab);
   const cancelTabSwitch = useUiStore((s) => s.cancelTabSwitch);
-  const cloudfarePaused = useUiStore((s) => s.cloudfarePaused);
+  const pausedTasks = useQueueStore((s) => s.tasks.filter((t) => t.status === 'paused' && !!t.pause));
 
   const isDirty = useConfigStore((s) => s.isDirty);
   const isPickerActive = useUiStore((s) => s.isPickerActive);
@@ -203,8 +191,9 @@ export default function App() {
       <Header />
       <TabBar activeTab={activeTab} onTabClick={handleTabClick} />
       <DomainBadge />
-      {cloudfarePaused && <CloudflarePauseAlert />}
-      <AwaitActionPauseAlert />
+      {pausedTasks.map((task) => (
+        <PauseAlert key={task.id} task={task} />
+      ))}
 
       <div className="app-content">
         {activeTab === 'config' ? <ConfigTab /> :

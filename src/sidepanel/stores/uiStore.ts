@@ -23,6 +23,9 @@ interface UiState {
   toasts: Toast[];
   pendingPickerStepId: string | null;
   pendingPickerField: string | null;
+  // Kept for local-mode (RunProgress.tsx single-task runs). Queue-mode pause
+  // state lives in queueStore.pause per PR5. Remove in a future PR when
+  // local-mode is also migrated to PauseAlert.
   cloudfarePaused: boolean;
   awaitActionPaused: { message: string; trigger?: import('../../types/messages').DetectionTrigger; domain?: string } | null;
 
@@ -55,7 +58,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   pendingPickerField: null,
   cloudfarePaused: false,
   awaitActionPaused: null,
-
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   requestTabSwitch: (tab) => {
@@ -107,7 +109,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSavedTabView: (view) => set({ savedTabView: view }),
   setCloudflarePaused: (v) => set({ cloudfarePaused: v }),
   setAwaitActionPaused: (v) => set({ awaitActionPaused: v }),
-
   showToast: (message, type = 'info', duration = 3000) => {
     const id = ++toastId;
     set((s) => ({ toasts: [...s.toasts, { id, message, type }] }));
