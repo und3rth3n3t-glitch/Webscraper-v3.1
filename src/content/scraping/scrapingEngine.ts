@@ -24,7 +24,7 @@ import { extractChartData } from '../extraction/chartExtractor';
 import { shapeTable, shapeChart } from '../shaping';
 import type { WireOutput, WireIteration } from '../shaping';
 import { slugify, disambiguate } from '../../utils/slugify';
-import { paginatePages, paginateElement, paginateRows, type PaginationContinuation } from './paginationHandler';
+import { paginatePages, paginateElement, paginateElementInPage, type PaginationContinuation } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { swLog } from '../../utils/swLog';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
@@ -376,21 +376,21 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                 // register cross-nav continuations, so receiving one means config drift.
                 if (opts.elements.length !== 1) {
                   swLog('[executeFlow] element pagination resume — multi-element scrape (config drift?), falling through');
-                } else if (elConfig.detectedType !== 'table' || !elConfig.paginate || !elConfig.paginationSelector) {
-                  swLog('[executeFlow] element pagination resume — element is no longer a paginated table, falling through');
+                } else if (elConfig.detectedType === 'chart') {
+                  swLog('[executeFlow] element pagination resume — element is a chart (paginate not supported), falling through');
+                } else if (!elConfig.paginate || !elConfig.paginationSelector) {
+                  swLog('[executeFlow] element pagination resume — element is no longer paginated, falling through');
                 } else {
-                  const finalRows = await runElementPaginationLoop(
+                  const finalOutput = await runElementPaginationLoop(
                     elConfig,
-                    ctx,
-                    paginationContinuation.rowBatches,
+                    { ...ctx, stepElementIndex: elIdx, stepIsSingleElement: true, paginationDelayMs: opts.paginationDelayMs },
+                    paginationContinuation.contributions,
                     onProgress,
                     afk,
                   );
-                  const outputKey = elConfig.outputKey?.trim()
-                    ? slugify(elConfig.outputKey.trim())
-                    : slugify(elConfig.name) || `element_${elIdx}`;
-                  Object.assign(iterOutputs, { [outputKey]: { kind: 'raw', data: finalRows } });
-                  swLog('[executeFlow] element pagination resume done | taskId:', taskId, '| stepIndex:', si, '| elementIndex:', elIdx, '| totalRows:', finalRows.length);
+                  const outputKey = deriveElementOutputKey(elConfig, elIdx);
+                  Object.assign(iterOutputs, { [outputKey]: { kind: 'raw', data: finalOutput } });
+                  swLog('[executeFlow] element pagination resume done | taskId:', taskId, '| stepIndex:', si, '| elementIndex:', elIdx, '| detectedType:', elConfig.detectedType, '| selectMode:', elConfig.selectMode);
                   continue;
                 }
               }
@@ -1202,7 +1202,7 @@ interface ScrapeContext {
   // pagination only engages when this is true; multi-element steps keep
   // using the existing in-page `paginateElement`.
   stepIsSingleElement?: boolean;
-  // Pagination-delay knob propagated from the step options so paginateRows
+  // Pagination-delay knob propagated from the step options so paginateElement
   // doesn't need a separate threading path.
   paginationDelayMs?: number;
 }
@@ -1272,33 +1272,76 @@ async function runPaginationLoop(
   return { content: mergePages(pages), pagesScraped: pages.length };
 }
 
-// Mirrors runPaginationLoop but for element-level table pagination.
-// Returns a flat list of all rows across all pages.
+// Decides the per-page extractor and final-merge function based on
+// elConfig.detectedType and elConfig.selectMode. Charts are not
+// supported (no useful pagination semantic) — caller must guard.
+function buildElementPagination(elConfig: ScrapeElementConfig): {
+  extractor: () => Promise<unknown>;
+  finalMerge: (contributions: unknown[]) => unknown;
+} {
+  // Container / 'all' mode: each page yields one extractContainer result.
+  // Final output: array of per-page extractions (can't merge structurally
+  // without knowing the shape).
+  if (elConfig.selectMode === 'all' || elConfig.detectedType === 'container') {
+    return {
+      extractor: async () => {
+        const { element: freshEl } = resolveElement(elConfig.selector);
+        if (!freshEl) return null;
+        const target = freshEl as HTMLElement;
+        await smoothScrollToElement(target);
+        return extractContainer(target);
+      },
+      finalMerge: (contributions) => contributions,
+    };
+  }
+
+  // Table: each page yields rows[]. Final output: rows.flat() (preserves
+  // PR-Bot3 shape).
+  if (elConfig.detectedType === 'table') {
+    return {
+      extractor: async () => {
+        const { element: freshEl } = resolveElement(elConfig.selector);
+        if (!freshEl) return [] as Record<string, unknown>[];
+        const target = freshEl as HTMLElement;
+        await smoothScrollToElement(target);
+        const rows = extractTable(target);
+        if (elConfig.dynamicHeaders) return filterByExcludedIndices(rows, elConfig.excludedColumnIndices);
+        if (elConfig.tableFields?.length > 0) return applyFieldFilter(rows, elConfig.tableFields);
+        return rows;
+      },
+      finalMerge: (contributions) => (contributions as Record<string, unknown>[][]).flat(),
+    };
+  }
+
+  // Single element (default fall-through): each page yields a scalar
+  // (text content). Final output: array of scalars.
+  return {
+    extractor: async () => {
+      const { element: freshEl } = resolveElement(elConfig.selector);
+      if (!freshEl) return '';
+      const target = freshEl as HTMLElement;
+      await smoothScrollToElement(target);
+      return target.textContent?.trim() ?? '';
+    },
+    finalMerge: (contributions) => contributions,
+  };
+}
+
+// Generalized element pagination loop. Dispatches per-page extractor
+// and final-merge based on elConfig.detectedType + selectMode.
+// Returns unknown (was Record<string, unknown>[] for tables only).
 async function runElementPaginationLoop(
   elConfig: ScrapeElementConfig,
   ctx: ScrapeContext,
-  startingRowBatches: Record<string, unknown>[][],
+  startingContributions: unknown[],
   onProgress: (msg: string) => void,
   afk: boolean,
-): Promise<Record<string, unknown>[]> {
-  let rowBatches: Record<string, unknown>[][] = startingRowBatches;
-
-  // Closure that extracts THIS page's rows. Mirrors the inline
-  // scrapeCurrentPage in scrapeElement (kept in sync — if you change
-  // one, change both, or extract to a shared helper).
-  const extractCurrentPageRows = async (): Promise<Record<string, unknown>[]> => {
-    const { element: freshEl } = resolveElement(elConfig.selector);
-    if (!freshEl) return [];
-    const target = freshEl as HTMLElement;
-    await smoothScrollToElement(target);
-    const rows = extractTable(target);
-    if (elConfig.dynamicHeaders) return filterByExcludedIndices(rows, elConfig.excludedColumnIndices);
-    if (elConfig.tableFields?.length > 0) return applyFieldFilter(rows, elConfig.tableFields);
-    return rows;
-  };
+): Promise<unknown> {
+  const { extractor, finalMerge } = buildElementPagination(elConfig);
+  let contributions: unknown[] = startingContributions;
 
   while (true) {
-    const result = await paginateRows({
+    const result = await paginateElement({
       termIndex: ctx.termIndex,
       stepIndex: ctx.stepIndex,
       elementIndex: ctx.stepElementIndex ?? 0,
@@ -1309,18 +1352,28 @@ async function runElementPaginationLoop(
       searchTerms: ctx.searchTerms,
       taskId: ctx.taskId,
       previousIterations: ctx.previousIterations,
-      resumedRowBatches: rowBatches,
-      extractCurrentPageRows,
+      resumedContributions: contributions,
+      extractCurrentPage: extractor,
       onProgress,
       afk,
     });
 
-    rowBatches = result.rowBatches;
+    contributions = result.contributions;
     if (result.finished) break;
     // In-page change — loop and re-extract from the updated DOM.
   }
 
-  return rowBatches.flat();
+  return finalMerge(contributions);
+}
+
+// Derives the output key for a single-element resume. No disambiguate()
+// call needed — single-element resume has no key collisions.
+function deriveElementOutputKey(elConfig: ScrapeElementConfig, elementIndex: number): string {
+  return (
+    slugify((elConfig.outputKey ?? '').toString().trim())
+    || slugify((elConfig.name ?? '').toString())
+    || `element_${elementIndex}`
+  );
 }
 
 async function scrapeWholePage(
@@ -1495,7 +1548,7 @@ async function scrapeElement(
       allData.push(...scrapeCurrentPage());
       const container = findPaginationContainer(el, elConfig.paginationSelector);
 
-      await paginateElement({
+      await paginateElementInPage({
         paginationSelector: elConfig.paginationSelector,
         paginationCount: elConfig.paginationCount || 0,
         paginationDelayMs,
@@ -1512,9 +1565,28 @@ async function scrapeElement(
   }
 
   if (elConfig.selectMode === 'all') {
+    if (elConfig.paginate && elConfig.paginationSelector && ctx?.stepIsSingleElement === true) {
+      return runElementPaginationLoop(
+        elConfig,
+        { ...ctx, stepElementIndex: ctx.stepElementIndex ?? 0, paginationDelayMs },
+        [],
+        onProgress ?? (() => {}),
+        afk,
+      );
+    }
     return extractContainer(el);
   }
 
+  // Single-element extraction (default fall-through).
+  if (elConfig.paginate && elConfig.paginationSelector && ctx?.stepIsSingleElement === true) {
+    return runElementPaginationLoop(
+      elConfig,
+      { ...ctx, stepElementIndex: ctx.stepElementIndex ?? 0, paginationDelayMs },
+      [],
+      onProgress ?? (() => {}),
+      afk,
+    );
+  }
   return el.textContent?.trim() ?? '';
 }
 

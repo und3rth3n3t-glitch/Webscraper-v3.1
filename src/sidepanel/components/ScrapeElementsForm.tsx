@@ -661,36 +661,39 @@ function ElementConfigCard({
               )}
 
               {isChart && <ChartMethodInfo extra={config.extra} />}
+            </>
+          )}
 
-              {isTable && treatAsTable && (
-                <div className="form-group">
-                  <label className="form-check">
-                    <input type="checkbox" checked={!!config.paginate}
-                      onChange={e => onChange({ paginate: e.target.checked })} />
-                    Paginate
-                  </label>
-                  {config.paginate && (
-                    <div className="form-group-indented">
-                      <PaginationControlBanner
-                        descriptor={config.paginationSelector}
-                        onPick={onPickPagination}
-                      />
-                      <label className="form-label mt-8">Max pages</label>
-                      <input
-                        type="text"
-                        className="form-input"
-                        value={config.paginationCount || ''}
-                        onChange={e => {
-                          const val = e.target.value.replace(/[^0-9]/g, '');
-                          onChange({ paginationCount: val === '' ? 0 : Number(val) });
-                        }}
-                        placeholder="All"
-                      />
-                    </div>
-                  )}
+          {/* Paginate toggle — applies to all extractable types except charts.
+              Cross-nav pagination engages only for single-element scrape steps;
+              multi-element steps fall back to in-page pagination at runtime. */}
+          {!isChart && (
+            <div className="form-group">
+              <label className="form-check">
+                <input type="checkbox" checked={!!config.paginate}
+                  onChange={e => onChange({ paginate: e.target.checked })} />
+                Paginate
+              </label>
+              {config.paginate && (
+                <div className="form-group-indented">
+                  <PaginationControlBanner
+                    descriptor={config.paginationSelector}
+                    onPick={onPickPagination}
+                  />
+                  <label className="form-label mt-8">Max pages</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={config.paginationCount || ''}
+                    onChange={e => {
+                      const val = e.target.value.replace(/[^0-9]/g, '');
+                      onChange({ paginationCount: val === '' ? 0 : Number(val) });
+                    }}
+                    placeholder="All"
+                  />
                 </div>
               )}
-            </>
+            </div>
           )}
         </div>
       )}

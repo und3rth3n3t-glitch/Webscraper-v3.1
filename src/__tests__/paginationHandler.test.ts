@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { paginatePages, paginateRows } from '../content/scraping/paginationHandler';
+import { paginatePages, paginateElement } from '../content/scraping/paginationHandler';
 import type { SelectorDescriptor } from '../types/config';
 import type { PageContent } from '../content/extraction/pageBlockExtractor';
 
@@ -138,7 +138,7 @@ describe('paginatePages — accumulator size guard', () => {
   });
 });
 
-describe('paginateRows — finished states', () => {
+describe('paginateElement — finished states', () => {
   beforeEach(() => {
     messages.length = 0;
     document.body.innerHTML = '';
@@ -154,7 +154,7 @@ describe('paginateRows — finished states', () => {
 
   it('returns finished when pageCountTarget is reached', async () => {
     const fakeRows = [{ a: 1 }, { b: 2 }];
-    const result = await paginateRows({
+    const result = await paginateElement({
       termIndex: 0,
       stepIndex: 0,
       elementIndex: 0,
@@ -164,19 +164,19 @@ describe('paginateRows — finished states', () => {
       searchTerms: [],
       taskId: 't1',
       previousIterations: [],
-      resumedRowBatches: [],
-      extractCurrentPageRows: () => Promise.resolve(fakeRows),
+      resumedContributions: [],
+      extractCurrentPage: () => Promise.resolve(fakeRows),
     });
     expect(result.finished).toBe(true);
-    expect(result.rowBatches).toHaveLength(1);
-    expect(result.rowBatches[0]).toEqual(fakeRows);
+    expect(result.contributions).toHaveLength(1);
+    expect(result.contributions[0]).toEqual(fakeRows);
     expect(messages.find((m) => m.type === 'REGISTER_CONTINUATION')).toBeUndefined();
   });
 
-  it('appends to resumedRowBatches when resuming', async () => {
+  it('appends to resumedContributions when resuming', async () => {
     const earlierBatch = [{ x: 1 }];
     const newBatch = [{ y: 2 }, { y: 3 }];
-    const result = await paginateRows({
+    const result = await paginateElement({
       termIndex: 0,
       stepIndex: 0,
       elementIndex: 0,
@@ -186,16 +186,16 @@ describe('paginateRows — finished states', () => {
       searchTerms: [],
       taskId: 't1',
       previousIterations: [],
-      resumedRowBatches: [earlierBatch],
-      extractCurrentPageRows: () => Promise.resolve(newBatch),
+      resumedContributions: [earlierBatch],
+      extractCurrentPage: () => Promise.resolve(newBatch),
     });
     expect(result.finished).toBe(true);
-    expect(result.rowBatches).toEqual([earlierBatch, newBatch]);
+    expect(result.contributions).toEqual([earlierBatch, newBatch]);
   });
 
   it('returns finished when no next button is found', async () => {
     document.body.innerHTML = '<div>no pagination here</div>';
-    const result = await paginateRows({
+    const result = await paginateElement({
       termIndex: 0,
       stepIndex: 0,
       elementIndex: 0,
@@ -205,11 +205,11 @@ describe('paginateRows — finished states', () => {
       searchTerms: [],
       taskId: 't1',
       previousIterations: [],
-      resumedRowBatches: [],
-      extractCurrentPageRows: () => Promise.resolve([{ a: 1 }]),
+      resumedContributions: [],
+      extractCurrentPage: () => Promise.resolve([{ a: 1 }]),
     });
     expect(result.finished).toBe(true);
-    expect(result.rowBatches).toHaveLength(1);
+    expect(result.contributions).toHaveLength(1);
   });
 });
 
@@ -221,7 +221,7 @@ describe('PaginationContinuation discriminated union', () => {
     // resolution is brittle without a real picker; this test verifies the
     // registered continuation's kind only.
     //
-    // For now, exercise via paginateRows where we control the extractor
+    // For now, exercise via paginateElement where we control the extractor
     // and just look at what continuations get sent.
     const fakeRows = [{ a: 1 }];
     document.body.innerHTML = `
@@ -232,10 +232,32 @@ describe('PaginationContinuation discriminated union', () => {
     // this test may not exercise the full flow without a richer DOM stub.
     // Skip if the test environment doesn't support the click→wait race.
 
-    // Sanity: ensure paginateRows constructs a kind:'element' continuation
+    // Sanity: ensure paginateElement constructs a kind:'element' continuation
     // when registering. We can't easily intercept registration without a
     // real button click; rely on the smoke test for end-to-end verification.
     void fakeRows; // suppress unused-var warning
     expect(true).toBe(true); // placeholder; real verification via manual smoke
+  });
+});
+
+describe('paginateElement — generalized contributions', () => {
+  it('accepts arbitrary per-page contribution shapes', async () => {
+    const fakeContribution = { items: [1, 2, 3], pageMeta: 'a' };
+    const result = await paginateElement({
+      termIndex: 0,
+      stepIndex: 0,
+      elementIndex: 0,
+      paginationSelector: FAKE_SELECTOR,
+      pageCountTarget: 1,
+      config: {} as never,
+      searchTerms: [],
+      taskId: 't1',
+      previousIterations: [],
+      resumedContributions: [],
+      extractCurrentPage: () => Promise.resolve(fakeContribution),
+    });
+    expect(result.finished).toBe(true);
+    expect(result.contributions).toHaveLength(1);
+    expect(result.contributions[0]).toEqual(fakeContribution);
   });
 });

@@ -37,10 +37,11 @@ export type PaginationContinuation =
       pagesScraped: number;
       pageCountTarget: number;
       paginationDelayMs?: number;
-      // One batch of rows per past page. Engine flattens at final
-      // consumption time. Stored unflattened so we keep page boundaries
-      // for diagnostics and so each batch is independent on resume.
-      rowBatches: Record<string, unknown>[][];
+      // One entry per past page. Shape depends on the elConfig the engine
+      // resumed from: rows[] for tables, container extraction for
+      // containers/lists, scalar for single elements. Engine-side casts
+      // back to T at the boundary.
+      contributions: unknown[];
     };
 
 export interface PaginatePageStepResult {
@@ -229,7 +230,7 @@ export async function paginatePages(args: {
   return { finished: result.finished, pages: result.accumulator };
 }
 
-export async function paginateElement(params: {
+export async function paginateElementInPage(params: {
   paginationSelector: SelectorDescriptor;
   paginationCount?: number;
   paginationDelayMs?: number;
@@ -329,12 +330,12 @@ export function randomDelay(minMs: number, maxMs: number): Promise<void> {
   return new Promise((r) => setTimeout(r, minMs + Math.random() * (maxMs - minMs)));
 }
 
-export interface PaginateRowsResult {
+export interface PaginateElementResult {
   finished: boolean;
-  rowBatches: Record<string, unknown>[][];
+  contributions: unknown[];
 }
 
-export async function paginateRows(args: {
+export async function paginateElement(args: {
   termIndex: number;
   stepIndex: number;
   elementIndex: number;
@@ -345,12 +346,14 @@ export async function paginateRows(args: {
   searchTerms: string[];
   taskId?: string;
   previousIterations: WireIteration[];
-  resumedRowBatches: Record<string, unknown>[][];
-  extractCurrentPageRows: () => Promise<Record<string, unknown>[]>;
+  resumedContributions: unknown[];
+  // Per-page extractor. Returns one page's contribution; the engine
+  // determines the concrete shape based on elConfig.
+  extractCurrentPage: () => Promise<unknown>;
   onProgress?: (msg: string) => void;
   afk?: boolean;
-}): Promise<PaginateRowsResult> {
-  const result = await paginateAcrossNav<Record<string, unknown>[]>({
+}): Promise<PaginateElementResult> {
+  const result = await paginateAcrossNav<unknown>({
     termIndex: args.termIndex,
     stepIndex: args.stepIndex,
     paginationSelector: args.paginationSelector,
@@ -360,8 +363,8 @@ export async function paginateRows(args: {
     searchTerms: args.searchTerms,
     taskId: args.taskId,
     previousIterations: args.previousIterations,
-    resumedAccumulator: args.resumedRowBatches,
-    extractCurrentPage: args.extractCurrentPageRows,
+    resumedAccumulator: args.resumedContributions,
+    extractCurrentPage: args.extractCurrentPage,
     buildContinuation: ({ pagesScraped, accumulator }) => ({
       kind: 'element',
       termIndex: args.termIndex,
@@ -370,11 +373,11 @@ export async function paginateRows(args: {
       pagesScraped,
       pageCountTarget: args.pageCountTarget,
       paginationDelayMs: args.paginationDelayMs,
-      rowBatches: accumulator,
+      contributions: accumulator,
     }),
     onProgress: args.onProgress,
     afk: args.afk,
   });
 
-  return { finished: result.finished, rowBatches: result.accumulator };
+  return { finished: result.finished, contributions: result.accumulator };
 }
