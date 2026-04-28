@@ -24,7 +24,7 @@ import { extractChartData } from '../extraction/chartExtractor';
 import { shapeTable, shapeChart } from '../shaping';
 import type { WireOutput, WireIteration } from '../shaping';
 import { slugify, disambiguate } from '../../utils/slugify';
-import { paginatePages, paginateElement, type PaginationContinuation } from './paginationHandler';
+import { paginatePages, paginateElement, paginateRows, type PaginationContinuation } from './paginationHandler';
 import { PREFS_KEY } from '../../sidepanel/utils/storage';
 import { swLog } from '../../utils/swLog';
 import { filterByExcludedIndices } from '../extraction/tableFilterUtils';
@@ -340,7 +340,6 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
             && paginationContinuation.termIndex === i
             && paginationContinuation.stepIndex === si
             && step.type === 'scrape'
-            && (step as ScrapeStep).options.paginate
           ) {
             try {
               const opts = (step as ScrapeStep).options;
@@ -352,17 +351,52 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                 stepIndex: si,
                 previousIterations: result.iterations,
               };
-              const onProgress = (msg: string): void => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId });
+              const onProgress = (msg: string): void =>
+                sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId });
 
-              const resumed = await runPaginationLoop(opts, ctx, paginationContinuation.pages, onProgress, afk);
+              if (paginationContinuation.kind === 'wholePage' && opts.paginate) {
+                const resumed = await runPaginationLoop(opts, ctx, paginationContinuation.pages, onProgress, afk);
+                Object.assign(iterOutputs, { page: { kind: 'raw', data: resumed } });
+                swLog('[executeFlow] wholePage pagination resume done | taskId:', taskId, '| stepIndex:', si, '| pagesScraped:', resumed.pagesScraped);
+                continue;
+              }
 
-              // runPaginationLoop only returns when finished:true. (When the
-              // click navigates, paginatePages never returns and we resume
-              // in a fresh content-script context via continuation.)
-              const stepOutput: WireOutput = { kind: 'raw', data: resumed };
-              Object.assign(iterOutputs, { page: stepOutput });
-              swLog('[executeFlow] pagination resume done | taskId:', taskId, '| stepIndex:', si, '| pagesScraped:', resumed.pagesScraped);
-              continue; // skip the rest of this step iteration
+              if (
+                paginationContinuation.kind === 'element'
+                && opts.mode === 'specificElements'
+                && Array.isArray(opts.elements)
+                && paginationContinuation.elementIndex >= 0
+                && paginationContinuation.elementIndex < opts.elements.length
+              ) {
+                const elIdx = paginationContinuation.elementIndex;
+                const elConfig = opts.elements[elIdx];
+
+                // Single-element constraint: only resume cross-nav element pagination
+                // when the step has exactly one element. Multi-element scrapes never
+                // register cross-nav continuations, so receiving one means config drift.
+                if (opts.elements.length !== 1) {
+                  swLog('[executeFlow] element pagination resume — multi-element scrape (config drift?), falling through');
+                } else if (elConfig.detectedType !== 'table' || !elConfig.paginate || !elConfig.paginationSelector) {
+                  swLog('[executeFlow] element pagination resume — element is no longer a paginated table, falling through');
+                } else {
+                  const finalRows = await runElementPaginationLoop(
+                    elConfig,
+                    ctx,
+                    paginationContinuation.rowBatches,
+                    onProgress,
+                    afk,
+                  );
+                  const outputKey = elConfig.outputKey?.trim()
+                    ? slugify(elConfig.outputKey.trim())
+                    : slugify(elConfig.name) || `element_${elIdx}`;
+                  Object.assign(iterOutputs, { [outputKey]: { kind: 'raw', data: finalRows } });
+                  swLog('[executeFlow] element pagination resume done | taskId:', taskId, '| stepIndex:', si, '| elementIndex:', elIdx, '| totalRows:', finalRows.length);
+                  continue;
+                }
+              }
+
+              // kind/shape mismatch — log and fall through to normal step execution
+              swLog('[executeFlow] pagination resume kind/shape mismatch | kind:', paginationContinuation.kind, '| paginate:', opts.paginate, '| mode:', opts.mode);
             } catch (err) {
               const e = err as Error;
               swLog('[executeFlow] pagination resume failed — falling back to normal step | taskId:', taskId, '| err:', e.message);
@@ -960,13 +994,14 @@ async function scrapeElementToWire(
   afk: boolean,
   paginationDelayMs: number | undefined,
   usedKeys: Set<string>,
+  ctx?: ScrapeContext,
 ): Promise<{ outputKey: string; output: WireOutput }> {
   const baseKey = elConfig.outputKey?.trim()
     ? slugify(elConfig.outputKey.trim())
     : slugify(elConfig.name) || 'output';
   const outputKey = disambiguate(baseKey, usedKeys);
 
-  const rawResult = await scrapeElement(elConfig, onProgress, afk, paginationDelayMs);
+  const rawResult = await scrapeElement(elConfig, onProgress, afk, paginationDelayMs, ctx);
 
   if (elConfig.detectedType === 'table' && Array.isArray(rawResult)) {
     const { element: el } = resolveElement(elConfig.selector);
@@ -1011,9 +1046,17 @@ async function executeScrape(
     outputs['page'] = { kind: 'raw', data: pageData };
   } else {
     const usedKeys = new Set<string>();
-    for (const elConfig of opts.elements || []) {
+    const elements = opts.elements || [];
+    for (let elIdx = 0; elIdx < elements.length; elIdx++) {
+      const elConfig = elements[elIdx];
       onProgress?.(`Scraping "${elConfig.name}"...`);
-      const { outputKey, output } = await scrapeElementToWire(elConfig, onProgress, afk, opts.paginationDelayMs, usedKeys);
+      const elCtx: ScrapeContext | undefined = ctx ? {
+        ...ctx,
+        stepElementIndex: elIdx,
+        stepIsSingleElement: elements.length === 1,
+        paginationDelayMs: opts.paginationDelayMs,
+      } : undefined;
+      const { outputKey, output } = await scrapeElementToWire(elConfig, onProgress, afk, opts.paginationDelayMs, usedKeys, elCtx);
       usedKeys.add(outputKey);
       outputs[outputKey] = output;
     }
@@ -1152,6 +1195,16 @@ interface ScrapeContext {
   termIndex: number;
   stepIndex: number;
   previousIterations: WireIteration[];
+  // Element index within elements[] when scoped to a single element's
+  // pagination. Optional — runPaginationLoop (whole-page) doesn't use it.
+  stepElementIndex?: number;
+  // True when the enclosing scrape step has exactly one element. Cross-nav
+  // pagination only engages when this is true; multi-element steps keep
+  // using the existing in-page `paginateElement`.
+  stepIsSingleElement?: boolean;
+  // Pagination-delay knob propagated from the step options so paginateRows
+  // doesn't need a separate threading path.
+  paginationDelayMs?: number;
 }
 
 // Shared loop used by both initial entry (scrapeWholePage) and the
@@ -1217,6 +1270,57 @@ async function runPaginationLoop(
   }
 
   return { content: mergePages(pages), pagesScraped: pages.length };
+}
+
+// Mirrors runPaginationLoop but for element-level table pagination.
+// Returns a flat list of all rows across all pages.
+async function runElementPaginationLoop(
+  elConfig: ScrapeElementConfig,
+  ctx: ScrapeContext,
+  startingRowBatches: Record<string, unknown>[][],
+  onProgress: (msg: string) => void,
+  afk: boolean,
+): Promise<Record<string, unknown>[]> {
+  let rowBatches: Record<string, unknown>[][] = startingRowBatches;
+
+  // Closure that extracts THIS page's rows. Mirrors the inline
+  // scrapeCurrentPage in scrapeElement (kept in sync — if you change
+  // one, change both, or extract to a shared helper).
+  const extractCurrentPageRows = async (): Promise<Record<string, unknown>[]> => {
+    const { element: freshEl } = resolveElement(elConfig.selector);
+    if (!freshEl) return [];
+    const target = freshEl as HTMLElement;
+    await smoothScrollToElement(target);
+    const rows = extractTable(target);
+    if (elConfig.dynamicHeaders) return filterByExcludedIndices(rows, elConfig.excludedColumnIndices);
+    if (elConfig.tableFields?.length > 0) return applyFieldFilter(rows, elConfig.tableFields);
+    return rows;
+  };
+
+  while (true) {
+    const result = await paginateRows({
+      termIndex: ctx.termIndex,
+      stepIndex: ctx.stepIndex,
+      elementIndex: ctx.stepElementIndex ?? 0,
+      paginationSelector: elConfig.paginationSelector!,
+      pageCountTarget: elConfig.paginationCount || 0,
+      paginationDelayMs: ctx.paginationDelayMs,
+      config: ctx.config,
+      searchTerms: ctx.searchTerms,
+      taskId: ctx.taskId,
+      previousIterations: ctx.previousIterations,
+      resumedRowBatches: rowBatches,
+      extractCurrentPageRows,
+      onProgress,
+      afk,
+    });
+
+    rowBatches = result.rowBatches;
+    if (result.finished) break;
+    // In-page change — loop and re-extract from the updated DOM.
+  }
+
+  return rowBatches.flat();
 }
 
 async function scrapeWholePage(
@@ -1290,6 +1394,7 @@ async function scrapeElement(
   onProgress: OnProgress,
   afk: boolean,
   paginationDelayMs?: number,
+  ctx?: ScrapeContext,
 ): Promise<unknown> {
   const el = await resolveWithRetry(elConfig.selector, null, onProgress, elConfig.name);
 
@@ -1364,6 +1469,29 @@ async function scrapeElement(
     };
 
     if (elConfig.paginate && elConfig.paginationSelector) {
+      // Single-element scrape steps get cross-nav-aware pagination via the
+      // continuation state machine. Multi-element steps fall back to in-page
+      // only (existing paginateElement) — cross-nav with sibling elements
+      // raises semantic questions we're not solving in v1.
+      const isSingleElementStep = ctx && ctx.stepIsSingleElement === true;
+
+      if (isSingleElementStep) {
+        const elementCtx: ScrapeContext = {
+          ...ctx!,
+          stepElementIndex: ctx!.stepElementIndex ?? 0,
+          paginationDelayMs,
+        };
+        const allRows = await runElementPaginationLoop(
+          elConfig,
+          elementCtx,
+          [],
+          onProgress ?? (() => {}),
+          afk,
+        );
+        return allRows;
+      }
+
+      // Multi-element fallback: existing in-page pagination.
       allData.push(...scrapeCurrentPage());
       const container = findPaginationContainer(el, elConfig.paginationSelector);
 

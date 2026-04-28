@@ -15,16 +15,33 @@ const ELEMENT_SAFETY_CAP = 100;
 // payloads should stay well under to avoid SW relay slowdowns.
 const ACCUMULATOR_SOFT_LIMIT_BYTES = 10 * 1024 * 1024;
 
-// Continuation payload carrying pagination state across page navigations.
-// Serialised as JSON via chrome.runtime.sendMessage.
-export interface PaginationContinuation {
-  termIndex: number;            // which iteration of the search-term loop we're in
-  stepIndex: number;            // which step in loopSteps is the paginated scrape step
-  pagesScraped: number;         // number of pages already in `pages`
-  pageCountTarget: number;      // 0 = use safety cap; otherwise hard cap
-  paginationDelayMs?: number;
-  pages: PageContent[];         // accumulated page extractions
-}
+// Discriminated union for resumable pagination state.
+//   - 'wholePage' carries an array of full-page extractions
+//   - 'element'   carries per-page row batches scoped to one specific
+//                 element within the step
+export type PaginationContinuation =
+  | {
+      kind: 'wholePage';
+      termIndex: number;
+      stepIndex: number;
+      pagesScraped: number;
+      pageCountTarget: number;
+      paginationDelayMs?: number;
+      pages: PageContent[];
+    }
+  | {
+      kind: 'element';
+      termIndex: number;
+      stepIndex: number;
+      elementIndex: number;
+      pagesScraped: number;
+      pageCountTarget: number;
+      paginationDelayMs?: number;
+      // One batch of rows per past page. Engine flattens at final
+      // consumption time. Stored unflattened so we keep page boundaries
+      // for diagnostics and so each batch is independent on resume.
+      rowBatches: Record<string, unknown>[][];
+    };
 
 export interface PaginatePageStepResult {
   // True if pagination is finished (cap reached, no next button, disabled,
@@ -46,6 +63,114 @@ async function resolveButtonWithRetry(
     if (attempt < maxAttempts) await randomDelay(400, 600);
   }
   return null;
+}
+
+interface PaginateAcrossNavArgs<T> {
+  termIndex: number;
+  stepIndex: number;
+  paginationSelector: SelectorDescriptor;
+  pageCountTarget: number;
+  paginationDelayMs?: number;
+  config: ScraperConfig;
+  searchTerms: string[];
+  taskId?: string;
+  previousIterations: WireIteration[];
+  // Accumulator state. resumedAccumulator length reflects pages already
+  // scraped on prior legs.
+  resumedAccumulator: T[];
+  // Closure that extracts THIS page's contribution (one element of T).
+  extractCurrentPage: () => Promise<T>;
+  // Caller-provided builder that wraps the in-flight accumulator into
+  // a kind-specific PaginationContinuation. Lets the generic stay agnostic
+  // about the union variants.
+  buildContinuation: (state: { pagesScraped: number; accumulator: T[] }) => PaginationContinuation;
+  onProgress?: (msg: string) => void;
+  afk?: boolean;
+}
+
+interface PaginateAcrossNavResult<T> {
+  finished: boolean;
+  accumulator: T[];
+}
+
+async function paginateAcrossNav<T>(args: PaginateAcrossNavArgs<T>): Promise<PaginateAcrossNavResult<T>> {
+  const cap = args.pageCountTarget > 0
+    ? Math.min(args.pageCountTarget, PAGE_SAFETY_CAP)
+    : PAGE_SAFETY_CAP;
+  const interPageBase = args.paginationDelayMs ?? 1500;
+
+  // 1. Extract current page (initial entry → page 1; resumed leg → page N)
+  const thisPage = await args.extractCurrentPage();
+  const accumulator = [...args.resumedAccumulator, thisPage];
+  const pagesScraped = args.resumedAccumulator.length + 1;
+
+  args.onProgress?.(`Scraped page ${pagesScraped}${args.pageCountTarget > 0 ? ` of ${cap}` : ''}`);
+
+  // 2. Cap check
+  if (pagesScraped >= cap) {
+    args.onProgress?.(`Pagination cap reached (${cap}) — stopping`);
+    return { finished: true, accumulator };
+  }
+
+  // 3. Soft size guard
+  const accumulatorBytes = JSON.stringify(accumulator).length;
+  if (accumulatorBytes > ACCUMULATOR_SOFT_LIMIT_BYTES) {
+    args.onProgress?.(`Pagination accumulator exceeded ${Math.floor(ACCUMULATOR_SOFT_LIMIT_BYTES / (1024 * 1024))} MB — stopping`);
+    return { finished: true, accumulator };
+  }
+
+  // 4. Find next button
+  const nextBtn = await resolveButtonWithRetry(args.paginationSelector);
+  if (!nextBtn) {
+    args.onProgress?.('No next page button found — pagination complete');
+    return { finished: true, accumulator };
+  }
+
+  // 5. Disabled check
+  if (isDisabledOrHidden(nextBtn as HTMLElement)) {
+    args.onProgress?.('Next page button is disabled — pagination complete');
+    return { finished: true, accumulator };
+  }
+
+  // 6. Pre-emptive continuation registration (cross-nav fallback)
+  const continuationPayload = {
+    config: args.config,
+    searchTerms: args.searchTerms,
+    taskId: args.taskId,
+    startTermIndex: args.termIndex,
+    startLoopStepIndex: args.stepIndex,
+    previousIterations: args.previousIterations,
+    paginationContinuation: args.buildContinuation({ pagesScraped, accumulator }),
+  };
+  try {
+    await browser.runtime.sendMessage({
+      type: MessageType.REGISTER_CONTINUATION,
+      payload: continuationPayload,
+    });
+  } catch { /* extension context invalidated — fall through */ }
+
+  // 7. Click + race
+  const snapshotBefore = document.body.innerText.substring(0, 2000);
+  await randomDelay(interPageBase * 0.7, interPageBase * 1.3);
+  args.onProgress?.(`Loading page ${pagesScraped + 1}...`);
+  await naturalClick(nextBtn as HTMLElement, { afk: args.afk });
+
+  // 8. Wait for content change OR die. If page navigates, JS realm dies
+  //    here — control resumes via the continuation registered above.
+  const changed = await waitForContentChange(snapshotBefore, 12000);
+
+  // 9. We didn't navigate. Cancel the continuation we registered.
+  try {
+    await browser.runtime.sendMessage({ type: MessageType.CANCEL_CONTINUATION });
+  } catch { /* ignore */ }
+
+  if (!changed) {
+    args.onProgress?.('Page content did not change after clicking next — stopping');
+    return { finished: true, accumulator };
+  }
+
+  // 10. In-page change. Caller loops and calls again.
+  return { finished: false, accumulator };
 }
 
 // Single-page pagination step. Refactored from a self-contained loop into
@@ -76,100 +201,32 @@ export async function paginatePages(args: {
   onProgress?: (msg: string) => void;
   afk?: boolean;
 }): Promise<PaginatePageStepResult> {
-  const cap = args.pageCountTarget > 0
-    ? Math.min(args.pageCountTarget, PAGE_SAFETY_CAP)
-    : PAGE_SAFETY_CAP;
-  const interPageBase = args.paginationDelayMs ?? 1500;
-
-  // Scrape this page. If we're resuming, this is the new (post-nav) page.
-  const thisPage = await args.extractCurrentPage();
-  const pages = [...args.resumedPages, thisPage];
-  const pagesScraped = args.resumedPagesScraped + 1;
-
-  args.onProgress?.(`Scraped page ${pagesScraped}${args.pageCountTarget > 0 ? ` of ${cap}` : ''}`);
-
-  // Hard caps.
-  if (pagesScraped >= cap) {
-    args.onProgress?.(`Pagination cap reached (${cap}) — stopping`);
-    return { finished: true, pages };
-  }
-
-  // Soft size guard.
-  // Cheap probe: JSON.stringify only the new page; if it alone is huge,
-  // bail. Otherwise sample by serialising the whole array length.
-  // This is approximate (not a true byte count) but cheap enough to do
-  // on every page.
-  const accumulatorBytes = JSON.stringify(pages).length;  // chars ≈ bytes for ASCII-heavy text
-  if (accumulatorBytes > ACCUMULATOR_SOFT_LIMIT_BYTES) {
-    args.onProgress?.(`Pagination accumulator exceeded ${Math.floor(ACCUMULATOR_SOFT_LIMIT_BYTES / (1024 * 1024))} MB — stopping`);
-    return { finished: true, pages };
-  }
-
-  // Find next button.
-  const nextBtn = await resolveButtonWithRetry(args.paginationSelector);
-  if (!nextBtn) {
-    args.onProgress?.('No next page button found — pagination complete');
-    return { finished: true, pages };
-  }
-
-  if (isDisabledOrHidden(nextBtn as HTMLElement)) {
-    args.onProgress?.('Next page button is disabled — pagination complete');
-    return { finished: true, pages };
-  }
-
-  // Pre-register the cross-nav continuation. Cancelled below if in-page
-  // change resolves before the JS realm dies.
-  const continuationPayload = {
+  const result = await paginateAcrossNav<PageContent>({
+    termIndex: args.termIndex,
+    stepIndex: args.stepIndex,
+    paginationSelector: args.paginationSelector,
+    pageCountTarget: args.pageCountTarget,
+    paginationDelayMs: args.paginationDelayMs,
     config: args.config,
     searchTerms: args.searchTerms,
     taskId: args.taskId,
-    startTermIndex: args.termIndex,
-    startLoopStepIndex: args.stepIndex,
     previousIterations: args.previousIterations,
-    paginationContinuation: {
+    resumedAccumulator: args.resumedPages,
+    extractCurrentPage: args.extractCurrentPage,
+    buildContinuation: ({ pagesScraped, accumulator }) => ({
+      kind: 'wholePage',
       termIndex: args.termIndex,
       stepIndex: args.stepIndex,
       pagesScraped,
       pageCountTarget: args.pageCountTarget,
       paginationDelayMs: args.paginationDelayMs,
-      pages,
-    } as PaginationContinuation,
-  };
+      pages: accumulator,
+    }),
+    onProgress: args.onProgress,
+    afk: args.afk,
+  });
 
-  try {
-    await browser.runtime.sendMessage({
-      type: MessageType.REGISTER_CONTINUATION,
-      payload: continuationPayload,
-    });
-  } catch { /* extension context invalidated — fall through; click below will navigate or fail */ }
-
-  const snapshotBefore = document.body.innerText.substring(0, 2000);
-
-  // Inter-page jitter + click. Once we click an anchor with a real href,
-  // the page may navigate immediately; the await below never resolves in
-  // that case (JS realm dies). The continuation we just registered is
-  // what drives the resume on the new page.
-  await randomDelay(interPageBase * 0.7, interPageBase * 1.3);
-
-  args.onProgress?.(`Loading page ${pagesScraped + 1}...`);
-  await naturalClick(nextBtn as HTMLElement, { afk: args.afk });
-
-  const changed = await waitForContentChange(snapshotBefore, 12000);
-
-  // If we got here, the page did NOT navigate (in-page change or timeout).
-  // Cancel the continuation we registered — we don't need it.
-  try {
-    await browser.runtime.sendMessage({ type: MessageType.CANCEL_CONTINUATION });
-  } catch { /* ignore */ }
-
-  if (!changed) {
-    args.onProgress?.('Page content did not change after clicking next — stopping');
-    return { finished: true, pages };
-  }
-
-  // In-page change: caller will loop and call paginatePages again. We've
-  // accumulated `pages` so far and pages count.
-  return { finished: false, pages };
+  return { finished: result.finished, pages: result.accumulator };
 }
 
 export async function paginateElement(params: {
@@ -270,4 +327,54 @@ function waitForElementContentChange(
 
 export function randomDelay(minMs: number, maxMs: number): Promise<void> {
   return new Promise((r) => setTimeout(r, minMs + Math.random() * (maxMs - minMs)));
+}
+
+export interface PaginateRowsResult {
+  finished: boolean;
+  rowBatches: Record<string, unknown>[][];
+}
+
+export async function paginateRows(args: {
+  termIndex: number;
+  stepIndex: number;
+  elementIndex: number;
+  paginationSelector: SelectorDescriptor;
+  pageCountTarget: number;
+  paginationDelayMs?: number;
+  config: ScraperConfig;
+  searchTerms: string[];
+  taskId?: string;
+  previousIterations: WireIteration[];
+  resumedRowBatches: Record<string, unknown>[][];
+  extractCurrentPageRows: () => Promise<Record<string, unknown>[]>;
+  onProgress?: (msg: string) => void;
+  afk?: boolean;
+}): Promise<PaginateRowsResult> {
+  const result = await paginateAcrossNav<Record<string, unknown>[]>({
+    termIndex: args.termIndex,
+    stepIndex: args.stepIndex,
+    paginationSelector: args.paginationSelector,
+    pageCountTarget: args.pageCountTarget,
+    paginationDelayMs: args.paginationDelayMs,
+    config: args.config,
+    searchTerms: args.searchTerms,
+    taskId: args.taskId,
+    previousIterations: args.previousIterations,
+    resumedAccumulator: args.resumedRowBatches,
+    extractCurrentPage: args.extractCurrentPageRows,
+    buildContinuation: ({ pagesScraped, accumulator }) => ({
+      kind: 'element',
+      termIndex: args.termIndex,
+      stepIndex: args.stepIndex,
+      elementIndex: args.elementIndex,
+      pagesScraped,
+      pageCountTarget: args.pageCountTarget,
+      paginationDelayMs: args.paginationDelayMs,
+      rowBatches: accumulator,
+    }),
+    onProgress: args.onProgress,
+    afk: args.afk,
+  });
+
+  return { finished: result.finished, rowBatches: result.accumulator };
 }
