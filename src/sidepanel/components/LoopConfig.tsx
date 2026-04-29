@@ -1,9 +1,10 @@
-import { Type, MousePointerClick, Database, Repeat2, ArrowRight } from 'lucide-react';
+import { Type, MousePointerClick, Database, Repeat2, ArrowRight, Plus, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import BackButton from './BackButton';
 import Tooltip from './Tooltip';
 import { useConfigStore } from '../stores/configStore';
-import type { Step } from '../../types/config';
+import type { Step, InputSlot } from '../../types/config';
+import { generateId } from '../utils/uuid';
 
 const STEP_ICONS: Record<string, LucideIcon> = {
   setInput:   Type,
@@ -12,11 +13,32 @@ const STEP_ICONS: Record<string, LucideIcon> = {
   selectEach: Repeat2,
 };
 
+function labelToKey(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+}
+
 export default function LoopConfig() {
-  const { steps, updateStep, goBack } = useConfigStore();
+  const { steps, updateStep, goBack, inputSlots, setInputSlots } = useConfigStore();
 
   const setupSteps = steps.filter(s => s.isSetup);
   const loopSteps = steps.filter(s => !s.isSetup);
+  const hasSetInputLoop = loopSteps.some(s => s.type === 'setInput');
+
+  const addSlot = () => {
+    const label = `Field ${inputSlots.length + 1}`;
+    const newSlot: InputSlot = { id: generateId(), key: labelToKey(label) || `field-${inputSlots.length + 1}`, label };
+    setInputSlots([...inputSlots, newSlot]);
+  };
+
+  const removeSlot = (id: string) => {
+    setInputSlots(inputSlots.filter(s => s.id !== id));
+  };
+
+  const updateSlotLabel = (id: string, label: string) => {
+    setInputSlots(inputSlots.map(s =>
+      s.id === id ? { ...s, label, key: labelToKey(label) || s.key } : s,
+    ));
+  };
 
   return (
     <div className="view">
@@ -69,6 +91,47 @@ export default function LoopConfig() {
           />
         ))}
       </section>
+
+      {hasSetInputLoop && (
+        <section className="list-card loop-section">
+          <div className="loop-section-header">
+            <h3 className="loop-section-title">Input Fields</h3>
+            <Tooltip text="Define named columns when each loop iteration fills multiple fields. Each column maps to one Type Text step." />
+          </div>
+          <p className="loop-section-hint">One column per field — used when running with a table of rows</p>
+
+          {inputSlots.map(slot => (
+            <div key={slot.id} className="step-toggle-row">
+              <span className="step-toggle-icon"><Type size={14} /></span>
+              <input
+                className="form-input"
+                style={{ flex: 1, marginRight: 'var(--spacing-sm)' }}
+                value={slot.label}
+                onChange={e => updateSlotLabel(slot.id, e.target.value)}
+                placeholder="Field label"
+              />
+              <span className="form-hint" style={{ marginRight: 'var(--spacing-sm)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                key: {slot.key || '—'}
+              </span>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => removeSlot(slot.id)}
+                title="Remove field"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+
+          {inputSlots.length === 0 && (
+            <p className="empty-hint">No input fields. Add one below to enable multi-column input.</p>
+          )}
+
+          <button className="btn btn-secondary btn-sm" style={{ marginTop: 'var(--spacing-sm)' }} onClick={addSlot}>
+            <Plus size={12} /> Add field
+          </button>
+        </section>
+      )}
 
       <div className="form-actions">
         <button className="btn btn-primary btn-full" onClick={goBack}>

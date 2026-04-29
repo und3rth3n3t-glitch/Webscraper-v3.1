@@ -54,10 +54,21 @@ export const useSyncStore = create<SyncState>((set, get) => ({
           recordSubscription(serverUrl, token, sc.id);
           touched = true;
         } else if (serverIsNewer && !local.dirty) {
-          const updated = serverToLocal(sc, local);
-          await saveConfig(updated);
-          recordSubscription(serverUrl, token, sc.id);
-          touched = true;
+          const serverSteps = Array.isArray((sc.configJson as Record<string, unknown>)?.steps)
+            ? ((sc.configJson as { steps: unknown[] }).steps).length : 0;
+          const localSteps = local.steps?.length ?? 0;
+          if (serverSteps < localSteps) {
+            // Server has fewer steps than local — likely stale data. Raise conflict
+            // instead of silently overwriting good local steps with a bad server version.
+            set((s) => ({
+              conflicts: { ...s.conflicts, [sc.id]: { localConfig: local, serverConfig: sc } },
+            }));
+          } else {
+            const updated = serverToLocal(sc, local);
+            await saveConfig(updated);
+            recordSubscription(serverUrl, token, sc.id);
+            touched = true;
+          }
         } else if (serverIsNewer && local.dirty) {
           set((s) => ({
             conflicts: { ...s.conflicts, [sc.id]: { localConfig: local, serverConfig: sc } },
@@ -167,6 +178,8 @@ export const useSyncStore = create<SyncState>((set, get) => ({
       set((s) => ({
         conflicts: { ...s.conflicts, [configId]: { localConfig: cs.localConfig, serverConfig: result.current } },
       }));
+    } else {
+      set({ lastSyncError: (result as { error?: string }).error ?? 'Push failed' });
     }
   },
 

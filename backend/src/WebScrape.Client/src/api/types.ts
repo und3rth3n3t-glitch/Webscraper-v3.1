@@ -84,11 +84,13 @@ export type BindingKind = (typeof BindingKind)[keyof typeof BindingKind];
 export type LoopBlockConfigDto = {
   name: string;
   values: string[];
+  columns?: string[];
+  rows?: string[][];
 };
 
 export type StepBindingDto =
   | { kind: 'literal'; value: string }
-  | { kind: 'loopRef'; loopBlockId: string }
+  | { kind: 'loopRef'; loopBlockId: string; column?: string }
   | { kind: 'unbound' };
 
 export type ScrapeBlockConfigDto = {

@@ -16,6 +16,7 @@ export interface QueueTask {
   searchTerms: string[];
   iterationLabel?: string;
   iterationAssignments?: Record<string, string>;
+  inputRows?: Record<string, string>[];
   priority: number;
   createdAt: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';

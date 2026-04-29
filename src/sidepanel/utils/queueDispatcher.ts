@@ -11,11 +11,17 @@ export function startQueueDispatcher(): () => void {
   // onContentMessage filters those out, so use a raw listener.
   const rawListener = (message: unknown) => {
     const msg = message as { type?: string; payload?: unknown };
-    if (msg.type !== 'TASK_RECEIVED') return;
-    const task = msg.payload as QueueTask;
-    const store = useQueueStore.getState();
-    store.addTask(task);
-    store.setCurrentTask(task.id);
+    if (msg.type === 'TASK_RECEIVED') {
+      const task = msg.payload as QueueTask;
+      const store = useQueueStore.getState();
+      store.addTask(task);
+      store.setCurrentTask(task.id);
+      return;
+    }
+    if (msg.type === 'TASK_RESUMED') {
+      const { taskId } = (msg.payload ?? {}) as { taskId?: string };
+      if (taskId) useQueueStore.getState().resumeTask(taskId);
+    }
   };
   chrome.runtime.onMessage.addListener(rawListener);
 

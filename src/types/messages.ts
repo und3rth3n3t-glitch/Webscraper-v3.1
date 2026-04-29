@@ -27,7 +27,7 @@ export type ContentToSidepanelMessage =
 export type SidepanelToContentMessage =
   | { type: 'START_PICKER';           payload: { stepId: string; field: string; mode?: string } }
   | { type: 'CANCEL_PICKER' }
-  | { type: 'EXECUTE_FLOW';           payload: { config: import('./config').ScraperConfig; searchTerms: string[]; taskId?: string } }
+  | { type: 'EXECUTE_FLOW';           payload: { config: import('./config').ScraperConfig; searchTerms: string[]; inputRows?: Record<string, string>[]; taskId?: string } }
   | { type: 'ABORT_FLOW' }
   | { type: 'RESUME_AFTER_CLOUDFLARE' }
   | { type: 'RESUME_AFTER_PAUSE';     payload?: { markAsFalseAlarm?: boolean } }

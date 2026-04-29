@@ -16,6 +16,8 @@ public class LoopBlockConfigDto
 {
     public string Name { get; set; } = "";
     public List<string> Values { get; set; } = new();
+    public List<string>? Columns { get; set; }
+    public List<List<string>>? Rows { get; set; }
 }
 
 public class ScrapeBlockConfigDto
@@ -29,6 +31,7 @@ public class StepBindingDto
     public BindingKind Kind { get; set; }
     public string? Value { get; set; }
     public Guid? LoopBlockId { get; set; }
+    public string? Column { get; set; }
 }
 
 public class SaveTaskDto

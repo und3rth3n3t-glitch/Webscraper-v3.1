@@ -17,6 +17,12 @@ export interface SelectorDescriptor {
   _paginationMeta?: { text: string; tagName: string };
 }
 
+export interface InputSlot {
+  id: string;
+  key: string;
+  label: string;
+}
+
 // ── Step conditions ───────────────────────────────────────────────────────────
 
 export type StepCondition =
@@ -46,6 +52,8 @@ export interface SetInputOptions {
   alternateSelector: SelectorDescriptor | null;
   // Server-set at populate time; takes precedence over searchTerm at runtime.
   literalValue?: string;
+  // Extension manual multi-column: which input slot's value to type (undefined = use searchTerm).
+  inputKey?: string;
 }
 
 export interface ClickOptions {
@@ -207,6 +215,7 @@ export interface ScraperConfig {
   steps: Step[];
   dataMapping?: DataMapping;
   autoDetect?: AutoDetectConfig;
+  inputSlots?: InputSlot[];
   schemaVersion: 3 | 4 | 5;
   createdAt: number;
   updatedAt: number;

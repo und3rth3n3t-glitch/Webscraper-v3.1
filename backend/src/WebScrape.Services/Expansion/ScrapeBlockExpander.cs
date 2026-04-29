@@ -54,9 +54,25 @@ public class ScrapeBlockExpander : IBlockExpander
                         break;
 
                     case "loopRef":
-                        // Remove any stale literalValue so the extension falls through to searchTerms[i].
-                        if (stepNode["options"] is JsonObject loopOpts)
-                            loopOpts.Remove("literalValue");
+                        if (binding.Column is not null && binding.LoopBlockId.HasValue)
+                        {
+                            var assignmentKey = $"{binding.LoopBlockId.Value}:{binding.Column}";
+                            if (frame.LoopAssignments.TryGetValue(assignmentKey, out var assignedValue))
+                            {
+                                if (stepNode["options"] is not JsonObject colOpts)
+                                {
+                                    colOpts = new JsonObject();
+                                    stepNode["options"] = colOpts;
+                                }
+                                colOpts["literalValue"] = assignedValue;
+                            }
+                        }
+                        else
+                        {
+                            // Single-column loopRef: remove stale literalValue; extension falls through to searchTerms[i].
+                            if (stepNode["options"] is JsonObject loopOpts)
+                                loopOpts.Remove("literalValue");
+                        }
                         break;
 
                     default: // "unbound"
@@ -103,14 +119,18 @@ public class ScrapeBlockExpander : IBlockExpander
                     ? k.GetString() : null;
                 if (kindStr is null) continue;
 
+                var column = prop.Value.TryGetProperty("column", out var col) && col.ValueKind == JsonValueKind.String
+                    ? col.GetString() : null;
+
                 var payload = new BindingPayload(kindStr,
                     prop.Value.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null,
-                    prop.Value.TryGetProperty("loopBlockId", out var l) && l.ValueKind == JsonValueKind.String && Guid.TryParse(l.GetString(), out var lg) ? lg : null);
+                    prop.Value.TryGetProperty("loopBlockId", out var l) && l.ValueKind == JsonValueKind.String && Guid.TryParse(l.GetString(), out var lg) ? lg : null,
+                    column);
                 bindings[prop.Name] = payload;
             }
         }
         return (configId, bindings);
     }
 
-    private record BindingPayload(string Kind, string? Value, Guid? LoopBlockId);
+    private record BindingPayload(string Kind, string? Value, Guid? LoopBlockId, string? Column = null);
 }

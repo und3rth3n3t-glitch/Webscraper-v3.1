@@ -35,13 +35,14 @@ export default function ScrapeBlockInspector({ block, blocks, configs, dispatch 
   const handleConfigChange = (configId: string) => {
     const config = configs.find((c) => c.id === configId);
     const steps = config ? parseSetInputSteps(config.configJson) : [];
-    const innermostLoopId = loopAncestors[0]?.id ?? null;
+    const innermostLoop = loopAncestors[0] ?? null;
+    const innermostLoopId = innermostLoop?.id ?? null;
     dispatch({
       type: 'UPDATE_SCRAPE',
       id: block.id,
       patch: {
         scraperConfigId: configId,
-        stepBindings: autoBindSteps(steps, innermostLoopId),
+        stepBindings: autoBindSteps(steps, innermostLoopId, innermostLoop?.columns ?? []),
       },
     });
   };

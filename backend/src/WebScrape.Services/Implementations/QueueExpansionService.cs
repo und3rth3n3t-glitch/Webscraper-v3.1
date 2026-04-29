@@ -66,7 +66,7 @@ public class QueueExpansionService : IQueueExpansionService
             ConfigsById = configs,
         };
 
-        var emptyFrame = new ExpansionFrame(new Dictionary<Guid, string>(), Array.Empty<string>());
+        var emptyFrame = new ExpansionFrame(new Dictionary<string, string>(), Array.Empty<string>());
         var results = new List<ExpansionResult>();
         foreach (var root in roots)
         {

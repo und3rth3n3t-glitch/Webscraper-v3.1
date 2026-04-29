@@ -13,6 +13,7 @@ interface Props {
 
 export default function SetInputForm({ editingStepId }: Props) {
   const { steps, draftStep, updateStep, updateStepOptions, setView, commitDraft } = useConfigStore();
+  const { inputSlots } = useConfigStore();
 
   const step = editingStepId ? steps.find(s => s.id === editingStepId) : draftStep;
   const opts = (step?.options || {}) as Partial<SetInputOptions>;
@@ -62,6 +63,23 @@ export default function SetInputForm({ editingStepId }: Props) {
           placeholder="e.g. Search for product name"
         />
       </div>
+
+      {inputSlots.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">Input field</label>
+          <select
+            className="form-select"
+            value={opts.inputKey ?? ''}
+            onChange={e => updateOpt('inputKey', e.target.value || undefined)}
+          >
+            <option value="">Use search term (default)</option>
+            {inputSlots.map(slot => (
+              <option key={slot.id} value={slot.key}>{slot.label}</option>
+            ))}
+          </select>
+          <p className="form-hint">Which column's value to type here.</p>
+        </div>
+      )}
 
       <div className="form-group">
         <label className="form-label">Input element</label>

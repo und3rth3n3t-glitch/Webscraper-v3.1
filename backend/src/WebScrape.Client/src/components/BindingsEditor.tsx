@@ -11,13 +11,24 @@ type Props = {
 };
 
 function selectValue(binding: StepBindingDto): string {
-  if (binding.kind === 'loopRef') return `loopRef:${binding.loopBlockId}`;
+  if (binding.kind === 'loopRef') {
+    return binding.column
+      ? `loopRef:${binding.loopBlockId}:${binding.column}`
+      : `loopRef:${binding.loopBlockId}`;
+  }
   return binding.kind;
 }
 
 function bindingFromSelect(value: string): StepBindingDto {
   if (value.startsWith('loopRef:')) {
-    return { kind: 'loopRef', loopBlockId: value.slice('loopRef:'.length) };
+    const rest = value.slice('loopRef:'.length);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx !== -1) {
+      const loopBlockId = rest.slice(0, colonIdx);
+      const column = rest.slice(colonIdx + 1);
+      return { kind: 'loopRef', loopBlockId, column };
+    }
+    return { kind: 'loopRef', loopBlockId: rest };
   }
   if (value === 'literal') return { kind: 'literal', value: '' };
   return { kind: 'unbound' };
@@ -61,11 +72,20 @@ export default function BindingsEditor({ steps, loopAncestors, stepBindings, onC
               value={selectValue(binding)}
               onChange={(e) => update(step.id, bindingFromSelect(e.target.value))}
             >
-              {loopAncestors.map((a) => (
-                <option key={a.id} value={`loopRef:${a.id}`}>
-                  Loop value ({a.name}.currentItem)
-                </option>
-              ))}
+              {loopAncestors.map((a) => {
+                if (a.columns.length > 0) {
+                  return a.columns.map((col) => (
+                    <option key={`${a.id}:${col}`} value={`loopRef:${a.id}:${col}`}>
+                      {a.name} → {col}
+                    </option>
+                  ));
+                }
+                return (
+                  <option key={a.id} value={`loopRef:${a.id}`}>
+                    Loop value ({a.name}.currentItem)
+                  </option>
+                );
+              })}
               <option value="literal">Literal value</option>
               <option value="unbound">Unbound</option>
             </select>

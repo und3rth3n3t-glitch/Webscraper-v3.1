@@ -334,6 +334,7 @@ export default defineBackground(() => {
       payload: {
         config: resolved.config,
         searchTerms: resolved.searchTerms,
+        inputRows: resolved.inputRows,
         taskId: resolved.taskId,
         drainResumed: false, // initial send — task just started
       },
@@ -354,6 +355,11 @@ export default defineBackground(() => {
   // start-time there is no scheduler record yet to remove.
   function drainNextRemoteTask(taskId: string, completedStatus: 'completed' | 'failed' = 'failed'): void {
     activePauseState = null;
+    // Symmetric cleanup: a task that ends (completed, failed, or window
+    // closed) cannot be in a paused state any more.
+    pausedTaskIds.delete(taskId);
+    refreshBadge();
+    chrome.notifications.clear(taskNotificationId(taskId)).catch(() => {});
     // PR6-fix — capture the scheduler phase BEFORE endTask runs (which may
     // transition us to idle). The previous prevSchedulerPhase tracker
     // started at 'idle' and never saw the intermediate preflight/drain
@@ -677,6 +683,7 @@ export default defineBackground(() => {
         pausedTaskIds.delete(target.task.id);
         refreshBadge();
         chrome.notifications.clear(taskNotificationId(target.task.id)).catch(() => {});
+        chrome.runtime.sendMessage({ type: 'TASK_RESUMED', payload: { taskId: target.task.id } }).catch(() => {});
       }
       return;
     }
@@ -711,6 +718,18 @@ export default defineBackground(() => {
       }
 
       activePauseState = null;
+      // Clear pause UI signals: drop this taskId from the paused set, refresh
+      // badge (clears if no other pauses), and clear any pending notification
+      // for this task. Safe to call when no notification was fired — clear()
+      // is idempotent.
+      if (resumePayload.taskId) {
+        pausedTaskIds.delete(resumePayload.taskId);
+        refreshBadge();
+        chrome.notifications.clear(taskNotificationId(resumePayload.taskId)).catch(() => {});
+        // Notify the sidepanel so it clears the ribbon regardless of which
+        // surface (in-page banner or sidepanel button) triggered the resume.
+        chrome.runtime.sendMessage({ type: 'TASK_RESUMED', payload: { taskId: resumePayload.taskId } }).catch(() => {});
+      }
       console.warn('[SW] sidepanel resume | type:', type, '| taskId:', resumePayload.taskId, '| wasPaused:', wasPaused, '| markAsFalseAlarm:', resumePayload.markAsFalseAlarm);
 
       // PR5 — per-task routing. If a taskId is present, route to that task's

@@ -21,13 +21,19 @@ export function parseSetInputSteps(configJson: unknown): SetInputStep[] {
 export function autoBindSteps(
   steps: SetInputStep[],
   innermostLoopBlockId: string | null,
+  loopColumns: string[] = [],
 ): Record<string, StepBindingDto> {
   const result: Record<string, StepBindingDto> = {};
-  let firstBound = false;
-  for (const step of steps) {
-    if (!firstBound && innermostLoopBlockId) {
+  const isMultiColumn = loopColumns.length > 0 && !!innermostLoopBlockId;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (isMultiColumn) {
+      const col = loopColumns[i];
+      result[step.id] = col
+        ? { kind: 'loopRef', loopBlockId: innermostLoopBlockId!, column: col }
+        : { kind: 'unbound' };
+    } else if (i === 0 && innermostLoopBlockId) {
       result[step.id] = { kind: 'loopRef', loopBlockId: innermostLoopBlockId };
-      firstBound = true;
     } else {
       result[step.id] = { kind: 'unbound' };
     }

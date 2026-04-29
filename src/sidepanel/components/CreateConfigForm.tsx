@@ -4,11 +4,18 @@ import { useConfigStore } from '../stores/configStore';
 import { useUiStore } from '../stores/uiStore';
 
 export default function CreateConfigForm() {
-  const { pageDomain, setConfigName, setDomainLocked, saveCurrentConfig, setView } = useConfigStore();
+  const { pageDomain, setConfigName, setDomainLocked, setConfigDomain, saveCurrentConfig, setView } = useConfigStore();
   const { showToast } = useUiStore();
   const [name, setName] = useState('');
   const [lockToDomain, setLockToDomain] = useState(false);
+  const [domain, setDomain] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const handleToggleLock = (checked: boolean) => {
+    setLockToDomain(checked);
+    if (checked) setDomain(pageDomain);
+    else setDomain('');
+  };
 
   const handleNext = async () => {
     const trimmed = name.trim();
@@ -20,6 +27,7 @@ export default function CreateConfigForm() {
     try {
       setConfigName(trimmed);
       setDomainLocked(lockToDomain);
+      setConfigDomain(lockToDomain ? domain : '');
       await saveCurrentConfig();
       setView('STEP_LIST');
     } catch (err) {
@@ -53,16 +61,25 @@ export default function CreateConfigForm() {
           <input
             type="checkbox"
             checked={lockToDomain}
-            onChange={e => setLockToDomain(e.target.checked)}
+            onChange={e => handleToggleLock(e.target.checked)}
             disabled={!pageDomain}
           />
-          Lock to current domain
+          Lock to domain
         </label>
-        {pageDomain && (
-          <p className="form-hint">This config will only appear when browsing {pageDomain}</p>
-        )}
         {!pageDomain && (
           <p className="form-hint">Navigate to a website first to enable domain locking</p>
+        )}
+        {lockToDomain && (
+          <input
+            className="form-input mt-4"
+            value={domain}
+            onChange={e => setDomain(e.target.value)}
+            placeholder="e.g. books.toscrape.com"
+            spellCheck={false}
+          />
+        )}
+        {lockToDomain && !domain && (
+          <p className="form-hint text-danger">Domain is required when locking is enabled</p>
         )}
       </div>
 
@@ -70,7 +87,7 @@ export default function CreateConfigForm() {
         <button
           className="btn btn-primary btn-full"
           onClick={handleNext}
-          disabled={saving}
+          disabled={saving || (lockToDomain && !domain.trim())}
         >
           {saving ? 'Creating...' : 'Next'}
         </button>

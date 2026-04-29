@@ -10,6 +10,8 @@ export type LoopEditorBlock = {
   orderIndex: number;
   name: string;
   values: string[];
+  columns: string[];
+  rows: string[][];
 };
 
 export type ScrapeEditorBlock = {
@@ -23,7 +25,7 @@ export type ScrapeEditorBlock = {
 
 export type EditorBlock = LoopEditorBlock | ScrapeEditorBlock;
 
-export type LoopAncestor = { id: string; name: string };
+export type LoopAncestor = { id: string; name: string; columns: string[] };
 
 export type TreeNode = {
   block: EditorBlock;
@@ -36,7 +38,7 @@ export type BlocksAction =
   | { type: 'ADD_SCRAPE'; parentId: string; newId: string }
   | { type: 'DELETE'; id: string }
   | { type: 'REORDER'; id: string; direction: 'up' | 'down' }
-  | { type: 'UPDATE_LOOP'; id: string; patch: Partial<Pick<LoopEditorBlock, 'name' | 'values'>> }
+  | { type: 'UPDATE_LOOP'; id: string; patch: Partial<Pick<LoopEditorBlock, 'name' | 'values' | 'columns' | 'rows'>> }
   | { type: 'UPDATE_SCRAPE'; id: string; patch: Partial<Pick<ScrapeEditorBlock, 'scraperConfigId' | 'stepBindings'>> };
 
 // ── Selectors ─────────────────────────────────────────────────────────────
@@ -81,7 +83,7 @@ export function loopAncestorsOf(blocks: EditorBlock[], blockId: string): LoopAnc
     const parent = byId.get(current.parentBlockId);
     if (!parent) break;
     if (parent.blockType === 'loop') {
-      result.push({ id: parent.id, name: parent.name });
+      result.push({ id: parent.id, name: parent.name, columns: parent.columns });
     }
     current = parent;
   }
@@ -119,6 +121,8 @@ export function addLoopChild(
     orderIndex: siblings.length,
     name: `loop${loopCount + 1}`,
     values: [],
+    columns: [],
+    rows: [],
   };
   return [...blocks, newBlock];
 }
@@ -183,7 +187,7 @@ export function reorderSibling(
 export function updateLoop(
   blocks: EditorBlock[],
   id: string,
-  patch: Partial<Pick<LoopEditorBlock, 'name' | 'values'>>,
+  patch: Partial<Pick<LoopEditorBlock, 'name' | 'values' | 'columns' | 'rows'>>,
 ): EditorBlock[] {
   return blocks.map((b) =>
     b.id === id && b.blockType === 'loop' ? { ...b, ...patch } : b,
@@ -212,6 +216,8 @@ export function hydrateFromDto(dtoBlocks: TaskBlockTreeDto[]): EditorBlock[] {
         orderIndex: dto.orderIndex,
         name: dto.loop?.name ?? 'loop',
         values: dto.loop?.values ?? [],
+        columns: dto.loop?.columns ?? [],
+        rows: dto.loop?.rows ?? [],
       };
     }
     return {
@@ -233,7 +239,11 @@ export function buildSaveBlocks(blocks: EditorBlock[]): TaskBlockTreeDto[] {
         parentBlockId: b.parentBlockId,
         blockType: BlockType.Loop,
         orderIndex: b.orderIndex,
-        loop: { name: b.name, values: b.values.filter((v) => v.trim().length > 0) },
+        loop: {
+          name: b.name,
+          values: b.values.filter((v) => v.trim().length > 0),
+          ...(b.columns.length > 0 ? { columns: b.columns, rows: b.rows } : {}),
+        },
         scrape: null,
       };
     }

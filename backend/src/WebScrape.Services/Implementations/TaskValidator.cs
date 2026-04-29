@@ -113,6 +113,12 @@ public class TaskValidator : ITaskValidator
                             errors.Add(new ValidationErrorDto { Code = ValidationCodes.LoopRefNotLoop, BlockId = block.Id, LoopBlockId = binding.LoopBlockId, StepId = stepId });
                         else if (!ancestors.Contains(binding.LoopBlockId.Value))
                             errors.Add(new ValidationErrorDto { Code = ValidationCodes.LoopRefNonAncestor, BlockId = block.Id, LoopBlockId = binding.LoopBlockId, StepId = stepId });
+                        else if (binding.Column is not null)
+                        {
+                            var loopColumns = GetLoopColumns(byId[binding.LoopBlockId.Value]);
+                            if (!loopColumns.Contains(binding.Column))
+                                errors.Add(new ValidationErrorDto { Code = ValidationCodes.LoopColumnNotFound, BlockId = block.Id, LoopBlockId = binding.LoopBlockId, StepId = stepId });
+                        }
                         break;
                     case BindingKind.Unbound:
                         break;
@@ -121,5 +127,10 @@ public class TaskValidator : ITaskValidator
         }
 
         return errors;
+    }
+
+    private static List<string> GetLoopColumns(TaskBlockTreeDto loopBlock)
+    {
+        return loopBlock.Loop?.Columns ?? new List<string>();
     }
 }

@@ -4,7 +4,7 @@ using WebScrape.Data.Enums;
 namespace WebScrape.Services.Expansion;
 
 public record ExpansionFrame(
-    IReadOnlyDictionary<Guid, string> LoopAssignments,
+    IReadOnlyDictionary<string, string> LoopAssignments,
     IReadOnlyList<string> SearchTerms);
 
 // Context passed top-down so expanders can reach siblings/children of the

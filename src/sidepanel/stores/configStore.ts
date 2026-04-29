@@ -8,6 +8,7 @@ import type {
   StepType,
   DataMapping,
   AutoDetectConfig,
+  InputSlot,
   SetInputOptions,
   ClickOptions,
   BestMatchOptions,
@@ -85,6 +86,7 @@ interface ConfigState {
   isDirty: boolean;
   pageUrl: string;
   pageDomain: string;
+  configDomain: string;
   domainLocked: boolean;
   draftStep: Step | null;
   editingStepId: string | null;
@@ -92,8 +94,10 @@ interface ConfigState {
   view: string;
   viewStack: string[];
   autoDetect: AutoDetectConfig | undefined;
+  inputSlots: InputSlot[];
 
   setPageInfo: (url: string, domain?: string) => void;
+  setConfigDomain: (domain: string) => void;
   pushView: (view: string) => void;
   goBack: () => void;
   setView: (view: string) => void;
@@ -112,6 +116,7 @@ interface ConfigState {
   setEditingStepId: (id: string | null) => void;
   setDataMapping: (mapping: DataMapping) => void;
   setAutoDetect: (cfg: AutoDetectConfig | undefined) => void;
+  setInputSlots: (slots: InputSlot[]) => void;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -121,6 +126,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isDirty: false,
   pageUrl: '',
   pageDomain: '',
+  configDomain: '',
   domainLocked: false,
   draftStep: null,
   editingStepId: null,
@@ -128,6 +134,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   view: 'NO_CONFIG',
   viewStack: [],
   autoDetect: undefined,
+  inputSlots: [],
 
   setPageInfo: (url, domain) => {
     set({
@@ -135,6 +142,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       pageDomain: domain || (() => { try { return new URL(url).hostname; } catch { return url; } })(),
     });
   },
+
+  setConfigDomain: (domain) => set({ configDomain: domain, isDirty: true }),
 
   pushView: (view) => {
     const current = get().view;
@@ -204,16 +213,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   saveCurrentConfig: async () => {
-    const { steps, currentConfig, pageDomain, pageUrl, configName, domainLocked, autoDetect } = get();
+    const { steps, currentConfig, configDomain, pageDomain, pageUrl, configName, domainLocked, autoDetect, inputSlots } = get();
     const config: ScraperConfig = {
       id: currentConfig?.id || generateId(),
       name: configName || 'Untitled Config',
-      domain: domainLocked ? pageDomain : '',
+      domain: domainLocked ? (configDomain || pageDomain) : '',
       domainLocked,
-      url: pageUrl,
+      url: currentConfig?.url || pageUrl,
       steps,
       dataMapping: currentConfig?.dataMapping,
       autoDetect,
+      inputSlots: inputSlots.length > 0 ? inputSlots : undefined,
       schemaVersion: (autoDetect ? 5 : CURRENT_SCHEMA_VERSION) as 4 | 5,
       createdAt: currentConfig?.createdAt || Date.now(),
       updatedAt: Date.now(),
@@ -249,7 +259,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       steps: safe.steps || [],
       configName: safe.name,
       domainLocked: safe.domainLocked ?? !!(safe.domain),
+      configDomain: safe.domain || '',
       autoDetect: safe.autoDetect,
+      inputSlots: safe.inputSlots ?? [],
       isDirty: false,
       view: 'STEP_LIST',
       viewStack: [],
@@ -264,7 +276,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       steps: [],
       configName: '',
       domainLocked: false,
+      configDomain: '',
       autoDetect: undefined,
+      inputSlots: [],
       isDirty: false,
       view: 'NO_CONFIG',
       viewStack: [],
@@ -282,4 +296,5 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   })),
 
   setAutoDetect: (cfg) => set({ autoDetect: cfg, isDirty: true }),
+  setInputSlots: (slots) => set({ inputSlots: slots, isDirty: true }),
 }));

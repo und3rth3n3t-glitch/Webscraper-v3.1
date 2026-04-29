@@ -8,12 +8,9 @@ public class LoopBlockExpander : IBlockExpander
 {
     public BlockType Handles => BlockType.Loop;
 
-    // Stored as IEnumerable so the DI factory can pass a mutable List<IBlockExpander>
-    // that includes `this` — populated after construction to break the circular dep.
     private readonly IEnumerable<IBlockExpander> _all;
     private IReadOnlyDictionary<BlockType, IBlockExpander>? _byTypeCache;
 
-    // Lazily built from _all so the list can be populated after ctor returns.
     private IReadOnlyDictionary<BlockType, IBlockExpander> ByType =>
         _byTypeCache ??= _all.ToDictionary(e => e.Handles);
 
@@ -24,26 +21,52 @@ public class LoopBlockExpander : IBlockExpander
 
     public IEnumerable<ExpansionResult> Expand(TaskBlock block, ExpansionContext ctx, ExpansionFrame frame)
     {
-        var values = ReadLoopValues(block);
-        // Empty loop: one run with an empty search term, consistent with prior behaviour.
-        var searchTerms = values.Count == 0 ? new List<string> { "" } : values;
-
         var children = ctx.AllBlocks
             .Where(b => b.ParentBlockId == block.Id)
             .OrderBy(b => b.OrderIndex)
             .ToList();
 
-        // Bundle all terms into one frame. Children receive the full list; the
-        // per-iteration cartesian walk is replaced by searchTerms on the wire.
-        var childFrame = new ExpansionFrame(
-            LoopAssignments: new Dictionary<Guid, string>(),
-            SearchTerms: searchTerms);
+        var (columns, rows) = ReadLoopColumnsAndRows(block);
 
-        foreach (var child in children)
+        if (columns.Count > 0 && rows.Count > 0)
         {
-            if (!ByType.TryGetValue(child.BlockType, out var expander)) continue;
-            foreach (var result in expander.Expand(child, ctx, childFrame))
-                yield return result;
+            // Multi-column path: one frame per row with baked assignments.
+            foreach (var row in rows)
+            {
+                var assignments = new Dictionary<string, string>(columns.Count);
+                for (var c = 0; c < columns.Count; c++)
+                    assignments[$"{block.Id}:{columns[c]}"] = row.Count > c ? row[c] : "";
+
+                // First column becomes the iteration label / searchTerm[0].
+                var iterLabel = row.Count > 0 ? row[0] : "";
+                var childFrame = new ExpansionFrame(
+                    LoopAssignments: assignments,
+                    SearchTerms: new List<string> { iterLabel });
+
+                foreach (var child in children)
+                {
+                    if (!ByType.TryGetValue(child.BlockType, out var expander)) continue;
+                    foreach (var result in expander.Expand(child, ctx, childFrame))
+                        yield return result;
+                }
+            }
+        }
+        else
+        {
+            // Single-column path: bundle all values into one frame (existing behaviour).
+            var values = ReadLoopValues(block);
+            var searchTerms = values.Count == 0 ? new List<string> { "" } : values;
+
+            var childFrame = new ExpansionFrame(
+                LoopAssignments: new Dictionary<string, string>(),
+                SearchTerms: searchTerms);
+
+            foreach (var child in children)
+            {
+                if (!ByType.TryGetValue(child.BlockType, out var expander)) continue;
+                foreach (var result in expander.Expand(child, ctx, childFrame))
+                    yield return result;
+            }
         }
     }
 
@@ -56,5 +79,30 @@ public class LoopBlockExpander : IBlockExpander
         foreach (var v in arr.EnumerateArray())
             if (v.ValueKind == JsonValueKind.String) list.Add(v.GetString() ?? "");
         return list;
+    }
+
+    private static (List<string> columns, List<List<string>> rows) ReadLoopColumnsAndRows(TaskBlock block)
+    {
+        var root = block.ConfigJsonb.RootElement;
+
+        var columns = new List<string>();
+        if (root.TryGetProperty("columns", out var colsEl) && colsEl.ValueKind == JsonValueKind.Array)
+            foreach (var c in colsEl.EnumerateArray())
+                if (c.ValueKind == JsonValueKind.String) columns.Add(c.GetString() ?? "");
+
+        var rows = new List<List<string>>();
+        if (root.TryGetProperty("rows", out var rowsEl) && rowsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var rowEl in rowsEl.EnumerateArray())
+            {
+                if (rowEl.ValueKind != JsonValueKind.Array) continue;
+                var row = new List<string>();
+                foreach (var cell in rowEl.EnumerateArray())
+                    row.Add(cell.ValueKind == JsonValueKind.String ? cell.GetString() ?? "" : "");
+                rows.Add(row);
+            }
+        }
+
+        return (columns, rows);
     }
 }

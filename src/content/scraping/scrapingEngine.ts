@@ -50,6 +50,7 @@ import type {
   StepCondition,
 } from '../../types/config';
 import type { ScrapingResult } from '../../types/extraction';
+import { showInPageBanner, hideInPageBanner } from '../pause/inPageBanner';
 
 let abortSignal = false;
 let flowRunning = false;
@@ -76,6 +77,8 @@ let drainResumed = false;
 // short-circuits if the flag is already true.
 let drainResumedReceived = false;
 let drainResumedResolver: (() => void) | null = null;
+
+let currentConfigName = '';
 
 // Runtime-toggleable: when true, scrape output includes verbose diagnostic
 // fields (saved-descriptor dumps on chart-resolution failures, etc.). The
@@ -158,6 +161,7 @@ export function abortFlow(): void {
 export interface ExecuteFlowParams {
   config: ScraperConfig;
   searchTerms: string[];
+  inputRows?: Record<string, string>[];
   taskId?: string;
   afk?: boolean;
   startTermIndex?: number;
@@ -175,6 +179,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
   const {
     config,
     searchTerms,
+    inputRows = undefined,
     taskId,
     afk = false,
     startTermIndex = 0,
@@ -184,6 +189,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
     paginationContinuation,
   } = params;
 
+  currentConfigName = config.name ?? '';
   swLog('[executeFlow] called | taskId:', taskId, '| flowRunning:', flowRunning, '| searchTerms:', searchTerms, '| startTermIndex:', startTermIndex, '| startLoopStepIndex:', startLoopStepIndex, '| previousIterations.length:', previousIterations.length);
   if (flowRunning) {
     swLog('[executeFlow] BLOCKED by flowRunning guard — original flow still running, suppressing duplicate');
@@ -261,7 +267,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
 
         for (const step of setupSteps) {
           checkAbort();
-          await executeStep(step, null, 0, (msg) => sendProgress({ phase: 'setup', stepLabel: msg, status: 'running', taskId }), afk, taskId);
+          await executeStep(step, null, null, 0, (msg) => sendProgress({ phase: 'setup', stepLabel: msg, status: 'running', taskId }), afk, taskId);
         }
       } catch (err) {
         const e = err as Error;
@@ -275,11 +281,13 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
       }
     }
 
-    const terms = searchTerms.length > 0 ? searchTerms : [null];
+    const useInputRows = !!(inputRows?.length);
+    const iterCount = useInputRows ? inputRows!.length : (searchTerms.length > 0 ? searchTerms.length : 1);
     const usedIterKeys = new Set<string>(previousIterations.map((it) => it.iterationKey));
 
-    for (let i = startTermIndex; i < terms.length; i++) {
-      const term = terms[i];
+    for (let i = startTermIndex; i < iterCount; i++) {
+      const term = useInputRows ? null : (searchTerms[i] ?? null);
+      const fields = useInputRows ? inputRows![i] : null;
       checkAbort();
 
       // PR4 — pause for drain (batch-mode only; no-op otherwise). Placed
@@ -413,6 +421,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                 payload: {
                   config,
                   searchTerms,
+                  inputRows,
                   taskId,
                   startTermIndex: i,
                   startLoopStepIndex: si + 1,
@@ -442,6 +451,7 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
                 stepData = await executeStep(
                   step,
                   term,
+                  fields,
                   i,
                   (msg) => sendProgress({ phase: 'loop', termIndex: i, stepLabel: msg, status: 'running', taskId }),
                   afk,
@@ -521,10 +531,11 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
         const e = err as Error;
         swLog('[executeFlow] iter CATCH | taskId:', taskId, '| termIndex:', i, '| name:', e.name, '| msg:', e.message, '| stack:', e.stack);
         if (e.message === 'ABORTED') {
+          const abortIterLabel = useInputRows ? (Object.values(inputRows![i])[0] ?? '') : (term ?? '');
           result.iterations.push({
             schemaVersion: 1,
-            iterationKey: disambiguate(slugify(term ?? '') || 'default', usedIterKeys),
-            iterationLabel: term ?? '',
+            iterationKey: disambiguate(slugify(abortIterLabel) || 'default', usedIterKeys),
+            iterationLabel: abortIterLabel,
             searchTerm: term,
             outputs: iterOutputs,
             status: 'error',
@@ -544,19 +555,20 @@ export async function executeFlow(params: ExecuteFlowParams): Promise<ScrapingRe
         }
       }
 
-      const iterKey = disambiguate(slugify(term ?? '') || 'default', usedIterKeys);
+      const iterLabel = useInputRows ? (Object.values(inputRows![i])[0] ?? '') : (term ?? '');
+      const iterKey = disambiguate(slugify(iterLabel) || 'default', usedIterKeys);
       usedIterKeys.add(iterKey);
       result.iterations.push({
         schemaVersion: 1,
         iterationKey: iterKey,
-        iterationLabel: term ?? '',
+        iterationLabel: iterLabel,
         searchTerm: term,
         outputs: iterOutputs,
         status: iterStatus,
         error: iterError,
       });
 
-      if (i < terms.length - 1) {
+      if (i < iterCount - 1) {
         // Inter-iteration pause (2â€“8s)
         await randomDelay(2000, 8000);
 
@@ -680,6 +692,20 @@ async function runWatchdogPause(
 
   swLog('[watchdog] fired | taskId:', taskId, '| trigger:', result.trigger, '| url:', window.location.href);
 
+  const pauseInfo = result.trigger === DetectionTrigger.CLOUDFLARE
+    ? { reason: 'cloudflare' as const }
+    : {
+        reason: 'awaitUserAction' as const,
+        trigger: result.trigger,
+        message: messageForTrigger(result.trigger),
+        domain: window.location.hostname,
+      };
+  showInPageBanner({
+    configName: currentConfigName,
+    taskId: taskId ?? '',
+    pause: pauseInfo,
+  });
+
   // Register a pause-continuation pointing at the current leg. If the user
   // resolves the obstacle via page-navigating action, the held continuation
   // re-delivers EXECUTE_FLOW after the user clicks Continue.
@@ -718,6 +744,7 @@ async function runWatchdogPause(
     await waitForResumeSignal();
   }
 
+  hideInPageBanner();
   swLog('[watchdog] cleared/resumed | taskId:', taskId);
   // Restart the pre-flight quiet window: the user just cleared the gate;
   // give the page another full PREFLIGHT_QUIET_MS to settle before
@@ -793,6 +820,7 @@ type OnProgress = ((msg: string) => void) | undefined;
 async function executeStep(
   step: Step,
   searchTerm: string | null,
+  fields: Record<string, string> | null,
   iterationIndex: number,
   onProgress: OnProgress,
   afk: boolean,
@@ -809,7 +837,7 @@ async function executeStep(
 
   switch (step.type) {
     case 'setInput':
-      return executeSetInput(step, searchTerm, iterationIndex, onProgress, afk);
+      return executeSetInput(step, searchTerm, fields, iterationIndex, onProgress, afk);
     case 'click':
       return executeClick(step, onProgress, afk);
     case 'bestMatch':
@@ -835,12 +863,13 @@ async function executeStep(
 async function executeSetInput(
   step: import('../../types/config').SetInputStep,
   searchTerm: string | null,
+  fields: Record<string, string> | null,
   iterationIndex: number,
   onProgress: OnProgress,
   afk: boolean,
 ): Promise<null> {
   const opts = step.options;
-  swLog('[setInput] iterationIndex:', iterationIndex, '| literalValue:', opts.literalValue, '| searchTerm:', searchTerm, '| valueToType will be:', opts.literalValue ?? searchTerm ?? '');
+  swLog('[setInput] iterationIndex:', iterationIndex, '| literalValue:', opts.literalValue, '| inputKey:', opts.inputKey, '| searchTerm:', searchTerm, '| fields:', fields);
 
   const el = await resolveWithRetry(
     step.selector!,
@@ -849,8 +878,12 @@ async function executeSetInput(
     step.label || 'input',
   );
 
-  // Precedence: server-set literalValue > per-iteration searchTerm > empty string.
-  const valueToType = opts.literalValue ?? searchTerm ?? '';
+  // Precedence: server-set literalValue > inputKey lookup in fields > per-iteration searchTerm > empty string.
+  const valueToType =
+    opts.literalValue ??
+    (opts.inputKey && fields ? (fields[opts.inputKey] ?? '') : null) ??
+    searchTerm ??
+    '';
 
   onProgress?.(`Typing "${valueToType}" into ${step.label || 'input field'}`);
 
@@ -868,8 +901,8 @@ async function executeSetInput(
     await randomDelay(600, 1200);
   }
 
-  void iterationIndex; // No longer used â€” alternate is iteration-independent.
-  void afk; // afk mode: typeText handles delays; no change needed for text input
+  void iterationIndex;
+  void afk;
   return null;
 }
 
@@ -1139,6 +1172,17 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
 
   onProgress?.(`Waiting for user: ${opts.message}`);
 
+  showInPageBanner({
+    configName: currentConfigName,
+    taskId: taskId ?? '',
+    pause: {
+      reason: 'awaitUserAction',
+      trigger: evalResult.trigger,
+      message: opts.message,
+      domain: window.location.hostname,
+    },
+  });
+
   browser.runtime.sendMessage({
     type: MessageType.FLOW_PAUSED,
     payload: {
@@ -1151,6 +1195,7 @@ async function executeAwaitUserAction(step: AwaitUserActionStep, onProgress: OnP
   });
 
   await waitForResumeSignal();
+  hideInPageBanner();
   swLog('[awaitUserAction] resume signal received | taskId:', taskId);
   activePreflightTimer?.arm();
 

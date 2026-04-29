@@ -17,13 +17,14 @@ interface RunState {
   isRunning: boolean;
   taskId: string | null;
   searchTerms: (string | null)[];
+  inputRows: Record<string, string>[] | null;
   progress: ProgressEntry[];
   logEntries: LogEntry[];
   results: ScrapingResult | null;
   error: string | null;
   runContext: 'config' | 'saved';
 
-  startRun: (terms: (string | null)[]) => void;
+  startRun: (terms: (string | null)[], rowCount?: number) => void;
   stopRun: () => void;
   setTaskId: (id: string | null) => void;
   updateProgress: (termIndex: number, updates: Partial<ProgressEntry>) => void;
@@ -31,7 +32,7 @@ interface RunState {
   setResults: (results: ScrapingResult) => void;
   setError: (error: string) => void;
   launchRun: (context?: 'config' | 'saved') => Promise<void>;
-  executeRun: (terms: (string | null)[], taskId?: string) => Promise<void>;
+  executeRun: (terms: (string | null)[], inputRows?: Record<string, string>[], taskId?: string) => Promise<void>;
   navigateRun: (view: string) => Promise<void>;
   goBackFromRun: () => Promise<void>;
 }
@@ -40,18 +41,20 @@ export const useRunStore = create<RunState>((set, get) => ({
   isRunning: false,
   taskId: null,
   searchTerms: [],
+  inputRows: null,
   progress: [],
   logEntries: [],
   results: null,
   error: null,
   runContext: 'config',
 
-  startRun: (terms) => {
+  startRun: (terms, rowCount) => {
     const effectiveTerms = terms.length > 0 ? terms : [null];
+    const progressCount = Math.max(rowCount ?? 0, effectiveTerms.length);
     set({
       isRunning: true,
       searchTerms: effectiveTerms,
-      progress: effectiveTerms.map(() => ({ status: 'pending', message: null, stepLabel: null })),
+      progress: Array.from({ length: progressCount }, () => ({ status: 'pending', message: null, stepLabel: null })),
       logEntries: [],
       results: null,
       error: null,
@@ -120,24 +123,25 @@ export const useRunStore = create<RunState>((set, get) => ({
     }
   },
 
-  executeRun: async (terms, taskId) => {
+  executeRun: async (terms, inputRows, taskId) => {
     const { useConfigStore } = await import('./configStore');
     const { useUiStore } = await import('./uiStore');
-    const { currentConfig, configName, steps } = useConfigStore.getState();
+    const { currentConfig, configName, steps, inputSlots } = useConfigStore.getState();
     const { showToast } = useUiStore.getState();
 
-    get().startRun(terms);
-    set({ taskId: taskId ?? null });
+    get().startRun(terms, inputRows?.length);
+    set({ taskId: taskId ?? null, inputRows: inputRows ?? null });
     await get().navigateRun('RUNNING');
 
     const config = {
       id: currentConfig?.id || 'draft',
       name: configName || 'Untitled',
       steps,
+      inputSlots: inputSlots.length > 0 ? inputSlots : undefined,
     };
 
     try {
-      await sendToContent('EXECUTE_FLOW', { config, searchTerms: terms, taskId });
+      await sendToContent('EXECUTE_FLOW', { config, searchTerms: terms, inputRows, taskId });
     } catch (err) {
       showToast(`Failed to start: ${(err as Error).message}`, 'error');
     }

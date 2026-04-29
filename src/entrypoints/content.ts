@@ -92,6 +92,7 @@ export default defineContentScript({
     type ExecuteFlowPayload = {
       config: ScraperConfig;
       searchTerms: string[];
+      inputRows?: Record<string, string>[];
       taskId?: string;
       startTermIndex?: number;
       startLoopStepIndex?: number;
@@ -150,6 +151,7 @@ export default defineContentScript({
           executeFlow({
             config: fp.config,
             searchTerms: fp.searchTerms ?? [],
+            inputRows: fp.inputRows,
             taskId: fp.taskId,
             startTermIndex: fp.startTermIndex ?? 0,
             startLoopStepIndex: fp.startLoopStepIndex ?? 0,

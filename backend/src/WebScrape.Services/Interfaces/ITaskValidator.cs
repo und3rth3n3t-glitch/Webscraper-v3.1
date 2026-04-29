@@ -13,6 +13,7 @@ public static class ValidationCodes
     public const string LoopRefNonAncestor         = "LOOP_REF_NON_ANCESTOR";
     public const string LoopRefMissing             = "LOOP_REF_MISSING";
     public const string LoopRefNotLoop             = "LOOP_REF_NOT_LOOP";
+    public const string LoopColumnNotFound         = "LOOP_COLUMN_NOT_FOUND";
     public const string BindingLiteralMissingValue = "BINDING_LITERAL_MISSING_VALUE";
     public const string ConfigNotOwned             = "CONFIG_NOT_OWNED";
 }
