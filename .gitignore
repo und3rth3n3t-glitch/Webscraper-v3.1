@@ -6,3 +6,6 @@ node_modules/
 
 # Production env file (template lives in backend/.env.prod.example)
 backend/.env.prod
+
+# Brand icons are copied here at build time by brandPlugin
+src/public/icons/

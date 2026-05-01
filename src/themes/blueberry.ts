@@ -1,8 +1,33 @@
-import type { ThemeConfig } from './types';
+import type { BrandConfig } from './types';
 
 export default {
-  name: 'Blueberry',
-  primary: '#5F259F',
-  secondary: '#BB16A3',
+  appName: 'Blueberry Web Scraper',
+  appDescription: 'Record and execute web scraping flows',
+  actionTitle: 'Open Blueberry Scraper',
+  welcomeHeading: 'Welcome to Blueberry Scraper',
+  notificationTitle: 'Blueberry',
+  logPrefix: '[Blueberry]',
+  searchVarPlaceholder: 'Blueberry Consultants\nAcme Corp\nTechStart Ltd',
   fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-} satisfies ThemeConfig;
+  iconDir: 'blueberry/icons',
+  palette: {
+    primary: '#5F259F',
+    primaryRgb: '95, 37, 159',
+    primaryLight: '#7B4DB5',
+    secondary: '#BB16A3',
+    bgTint: '#F5F0FA',
+    textDark: '#474747',
+    textLight: '#969696',
+    bgWhite: '#FFFFFF',
+    bgLight: '#F5F3F7',
+    bgHover: '#EDE8F2',
+    border: '#E0D8E8',
+    danger: '#D32F2F',
+    dangerLight: '#FFEBEE',
+    success: '#2E7D32',
+    successLight: '#E8F5E9',
+    warning: '#F57F17',
+    warningLight: '#FFF8E1',
+    infoLight: '#F5F0FA',
+  },
+} satisfies BrandConfig;
