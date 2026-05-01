@@ -47,7 +47,7 @@ try {
 } catch { /* SW restart timing */ }
 
 async function sendCdpRequest(
-  type: 'CDP_CLICK' | 'CDP_TYPE' | 'CDP_PRESS_KEY',
+  type: 'CDP_CLICK' | 'CDP_MOUSE_MOVE' | 'CDP_TYPE' | 'CDP_PRESS_KEY',
   payload: Record<string, unknown>,
 ): Promise<boolean> {
   try {
@@ -102,6 +102,11 @@ async function fittsMousePath(from: Point, to: Point, durationMs: number): Promi
   const cp1: Point = { x: from.x + dx * 0.3 + perp.x, y: from.y + dy * 0.3 + perp.y };
   const cp2: Point = { x: from.x + dx * 0.7 + perp.x, y: from.y + dy * 0.7 + perp.y };
 
+  // Probe CDP once at the start. If the first move comes back trusted, keep
+  // using CDP for the entire path so isTrusted is consistent across the
+  // whole movement. If it fails, fall back to synthetic dispatch for the rest.
+  let useCdp = true;
+
   for (let i = 0; i <= STEPS; i++) {
     const t = i / STEPS;
     const eased = easeInOutFitts(t);
@@ -110,14 +115,7 @@ async function fittsMousePath(from: Point, to: Point, durationMs: number): Promi
     pos.x += noise.x;
     pos.y += noise.y;
 
-    document.dispatchEvent(
-      new MouseEvent('mousemove', {
-        bubbles: true,
-        cancelable: true,
-        clientX: pos.x,
-        clientY: pos.y,
-      }),
-    );
+    await dispatchMove(pos.x, pos.y, () => { useCdp = false; }, useCdp);
     moveCursor(pos.x, pos.y);
 
     const stepDelay = (durationMs / STEPS) * (1 + (t > 0.8 ? (t - 0.8) * 3 : 0));
@@ -128,17 +126,33 @@ async function fittsMousePath(from: Point, to: Point, durationMs: number): Promi
   const corrections = 1 + Math.floor(Math.random() * 2);
   for (let c = 0; c < corrections; c++) {
     const jitter = gaussianNoise(2);
-    document.dispatchEvent(
-      new MouseEvent('mousemove', {
-        bubbles: true,
-        cancelable: true,
-        clientX: to.x + jitter.x,
-        clientY: to.y + jitter.y,
-      }),
-    );
-    moveCursor(to.x + jitter.x, to.y + jitter.y);
+    const x = to.x + jitter.x;
+    const y = to.y + jitter.y;
+    await dispatchMove(x, y, () => { useCdp = false; }, useCdp);
+    moveCursor(x, y);
     await delay(30 + Math.random() * 40);
   }
+}
+
+async function dispatchMove(
+  x: number,
+  y: number,
+  onCdpFail: () => void,
+  useCdp: boolean,
+): Promise<void> {
+  if (useCdp) {
+    const ok = await sendCdpRequest('CDP_MOUSE_MOVE', { x, y });
+    if (ok) return;
+    onCdpFail();
+  }
+  document.dispatchEvent(
+    new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+    }),
+  );
 }
 
 function easeInOutFitts(t: number): number {

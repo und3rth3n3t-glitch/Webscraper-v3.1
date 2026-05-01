@@ -1,4 +1,5 @@
 import type { ActiveRemoteTask } from './scheduler';
+import brand from '@/themes';
 
 export interface BatchSummary {
   total: number;
@@ -70,7 +71,7 @@ export function notifyBatchComplete(summary: BatchSummary): void {
     chrome.notifications.create(batchNotificationId(), {
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-      title: 'Blueberry — batch finished',
+      title: `${brand.notificationTitle} — batch finished`,
       message: formatBatchSummary(summary),
       priority: 1,
     }, () => {

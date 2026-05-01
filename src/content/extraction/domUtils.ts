@@ -1,8 +1,9 @@
 import type { SelectorDescriptor } from '../../types/config';
 import { naturalClick } from '../scraping/humanBehavior';
+import brand from '@/themes';
 
 function debugLog(context: string, error: unknown): void {
-  console.debug(`[Blueberry] ${context}:`, error instanceof Error ? error.message : error);
+  console.debug(`${brand.logPrefix} ${context}:`, error instanceof Error ? error.message : error);
 }
 
 // Imported lazily at call site to avoid circular dependency with selectorEngine

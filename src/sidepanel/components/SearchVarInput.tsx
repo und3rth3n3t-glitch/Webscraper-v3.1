@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import brand from '@/themes';
 import { Play, Plus, X } from 'lucide-react';
 import BackButton from './BackButton';
 import { useRunStore } from '../stores/runStore';
@@ -155,7 +156,7 @@ export default function SearchVarInput() {
           className="form-textarea"
           value={termsText}
           onChange={e => setTermsText(e.target.value)}
-          placeholder={"Blueberry Consultants\nAcme Corp\nTechStart Ltd"}
+          placeholder={brand.searchVarPlaceholder ?? ''}
           rows={8}
           autoFocus
         />

@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import brand from '@/themes';
 
 interface Props { children: ReactNode; }
 interface State { hasError: boolean; }
@@ -15,7 +16,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[Blueberry] UI crash:', error, errorInfo);
+    console.error(`${brand.logPrefix} UI crash:`, error, errorInfo);
   }
 
   handleReload = () => { window.location.reload(); };

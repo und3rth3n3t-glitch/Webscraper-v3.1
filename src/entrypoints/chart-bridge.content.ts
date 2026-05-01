@@ -1,3 +1,6 @@
+import brand from '@/themes';
+import { brandTag } from '@/themes/types';
+
 export default defineContentScript({
   matches: ['<all_urls>'],
   allFrames: true,
@@ -18,8 +21,8 @@ export default defineContentScript({
       setTimeout(() => {
         const wAny = window as unknown as Record<string, unknown>;
         const hc = wAny['Highcharts'] as { charts?: unknown[] } | undefined;
-        console.log('[Blueberry chart-bridge] alive in frame:', window.location.href.substring(0, 100));
-        console.log('[Blueberry chart-bridge] libraries detected:', {
+        console.log(`${brandTag(brand, 'chart-bridge')} alive in frame:`, window.location.href.substring(0, 100));
+        console.log(`${brandTag(brand, 'chart-bridge')} libraries detected:`, {
           Highcharts: typeof hc,
           HighchartsChartCount: hc?.charts?.length ?? 'n/a',
           ChartJs: typeof wAny['Chart'],
@@ -142,7 +145,7 @@ export default defineContentScript({
 
             if (DEBUG) {
               const matchCount = HC.charts.filter(matches).length;
-              console.log('[Blueberry chart-bridge] Highcharts extract: total=', HC.charts.filter(Boolean).length, 'matched=', matchCount, 'element=', (element as HTMLElement).tagName, (element as HTMLElement).className);
+              console.log(`${brandTag(brand, 'chart-bridge')} Highcharts extract: total=`, HC.charts.filter(Boolean).length, 'matched=', matchCount, 'element=', (element as HTMLElement).tagName, (element as HTMLElement).className);
             }
 
             if (chart) {

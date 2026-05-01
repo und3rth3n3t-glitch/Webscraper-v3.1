@@ -1,8 +1,9 @@
 import { extractTable } from './tableExtractor';
 import { extractValuesFromSvg, HIGHCHARTS_LOCATOR, APEXCHARTS_LOCATOR } from './svgValueEngine';
+import brand from '@/themes';
 
 function debugLog(context: string, error: unknown): void {
-  console.debug(`[Blueberry] ${context}:`, error instanceof Error ? error.message : error);
+  console.debug(`${brand.logPrefix} ${context}:`, error instanceof Error ? error.message : error);
 }
 
 const MARKER_ATTR = 'data-blueberry-chart-target';

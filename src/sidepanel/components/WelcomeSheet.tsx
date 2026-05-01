@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import brand from '@/themes';
 import { getPrefs, setPref } from '../utils/storage';
 
 export default function WelcomeSheet() {
@@ -20,8 +21,8 @@ export default function WelcomeSheet() {
   return (
     <div className="welcome-overlay" role="dialog" aria-modal="true" onClick={dismiss}>
       <div className="welcome-sheet" onClick={(e) => e.stopPropagation()}>
-        <h2 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--purple-primary)', marginBottom: '4px' }}>
-          Welcome to Blueberry Scraper
+        <h2 className="welcome-sheet-title">
+          {brand.welcomeHeading}
         </h2>
         <p style={{ fontSize: '13px', color: 'var(--text-light)', lineHeight: 1.5 }}>
           Build automated scraping flows in 3 simple steps:

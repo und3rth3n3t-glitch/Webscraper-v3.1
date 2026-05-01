@@ -37,6 +37,8 @@ interface SettingsState {
   setBatchParallelCap: (cap: number) => void;
   setNotifyOnPause: (v: boolean) => void;
   setNotifyOnBatchComplete: (v: boolean) => void;
+  brandBootstrapped: boolean;
+  markBrandBootstrapped: () => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -54,6 +56,7 @@ export const useSettingsStore = create<SettingsState>()(
       batchParallelCap: 4,
       notifyOnPause: true,
       notifyOnBatchComplete: true,
+      brandBootstrapped: false,
 
       setConnection: (serverUrl, jwtToken) =>
         set({ serverUrl, jwtToken, connected: false, lastConnectionError: null }),
@@ -84,6 +87,7 @@ export const useSettingsStore = create<SettingsState>()(
         set({ notifyOnPause }),
       setNotifyOnBatchComplete: (notifyOnBatchComplete) =>
         set({ notifyOnBatchComplete }),
+      markBrandBootstrapped: () => set({ brandBootstrapped: true }),
     }),
     {
       name: 'bb-settings',
@@ -98,6 +102,7 @@ export const useSettingsStore = create<SettingsState>()(
         batchParallelCap: s.batchParallelCap,
         notifyOnPause: s.notifyOnPause,
         notifyOnBatchComplete: s.notifyOnBatchComplete,
+        brandBootstrapped: s.brandBootstrapped,
       }),
     },
   ),

@@ -1,9 +1,11 @@
+import brand from '@/themes';
+
 const MAX_LABEL_LENGTH = 200;
 const MAX_DATA_POINTS = 500;
 const MAX_PATH_LENGTH = 20000;
 
 function debugLog(context: string, error: unknown): void {
-  console.debug(`[Blueberry] ${context}:`, error instanceof Error ? error.message : error);
+  console.debug(`${brand.logPrefix} ${context}:`, error instanceof Error ? error.message : error);
 }
 
 export const HIGHCHARTS_LOCATOR = {

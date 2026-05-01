@@ -99,6 +99,22 @@ export async function detach(tabId: number): Promise<void> {
   attachedTabs.delete(tabId);
 }
 
+export async function dispatchMouseMove(tabId: number, x: number, y: number): Promise<boolean> {
+  if (!attachedTabs.has(tabId)) return false;
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x, y,
+      button: 'none',
+      buttons: 0,
+    });
+    return true;
+  } catch (err) {
+    console.warn('[CDP] dispatchMouseMove failed:', (err as Error).message);
+    return false;
+  }
+}
+
 export async function dispatchClick(tabId: number, x: number, y: number): Promise<boolean> {
   if (!attachedTabs.has(tabId)) return false;
   try {

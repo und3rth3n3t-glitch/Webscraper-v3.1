@@ -74,6 +74,7 @@ export const MessageType = {
   CANCEL_CONTINUATION: 'CANCEL_CONTINUATION',
   // PR-Bot1: trusted-input round-trip from content → SW → chrome.debugger.
   CDP_CLICK: 'CDP_CLICK',
+  CDP_MOUSE_MOVE: 'CDP_MOUSE_MOVE',
   CDP_TYPE: 'CDP_TYPE',
   CDP_PRESS_KEY: 'CDP_PRESS_KEY',
 } as const;
