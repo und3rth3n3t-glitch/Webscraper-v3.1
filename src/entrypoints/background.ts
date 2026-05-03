@@ -173,36 +173,44 @@ export default defineBackground(() => {
 
   // ── Message routing ──
 
-  browser.runtime.onMessage.addListener((
-    rawMessage: unknown,
-    rawSender: unknown,
-    sendResponse: (r: unknown) => void,
-  ) => {
-    const message = rawMessage as Record<string, unknown>;
-    const sender = rawSender as chrome.runtime.MessageSender;
-    const type = message.type as string;
+  // Direct-match handler signature. Handlers that complete synchronously
+  // return void; handlers using sendResponse asynchronously return true to
+  // keep the message channel open (Chrome runtime contract).
+  type MessageHandler = (
+    message: Record<string, unknown>,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: unknown) => void,
+  ) => boolean | void;
 
-    if (type === 'OFFSCREEN_READY') {
+  // One entry per direct-match message type. Each entry is the original
+  // handler body verbatim — only the `if (type === 'X') { ... return; }`
+  // boilerplate is gone. Closures capture offscreen/badge/pauseState/runner/
+  // scheduler/persistence/frameRegistry/pendingContinuations/notifyOnPause/
+  // notifyOnBatchComplete by binding, so let-mutations (notifyOnPause etc)
+  // are observed live. Declared here (just before addListener) so all factory
+  // constructions above have completed by the time the map is built.
+  //
+  // RESUME_AFTER_PAUSE is intentionally NOT in this map — see the explicit
+  // if-block below for the fallthrough contract.
+  const directHandlers: Record<string, MessageHandler> = {
+    OFFSCREEN_READY: () => {
       offscreen.markReady();
-      return;
-    }
+    },
 
-    if (type === '__SW_LOG__') {
+    __SW_LOG__: (message) => {
       console.warn('[page]', message.payload);
-      return;
-    }
+    },
 
-    if (type === 'REGISTER_CONTINUATION') {
+    REGISTER_CONTINUATION: (message, sender) => {
       const tabId = sender.tab?.id;
       if (tabId) {
         const p = message.payload as Record<string, unknown>;
         console.warn('[SW] REGISTER_CONTINUATION tabId:', tabId, '| startTermIndex:', p.startTermIndex, '| startLoopStepIndex:', p.startLoopStepIndex, '| searchTerms:', p.searchTerms);
         pendingContinuations.set(tabId, message.payload);
       }
-      return;
-    }
+    },
 
-    if (type === 'CANCEL_CONTINUATION') {
+    CANCEL_CONTINUATION: (message, sender) => {
       const tabId = sender.tab?.id;
       if (tabId) {
         const had = pendingContinuations.has(tabId);
@@ -211,12 +219,10 @@ export default defineBackground(() => {
       } else {
         console.warn('[SW] CANCEL_CONTINUATION received with no sender.tab.id');
       }
-      return;
-    }
+    },
 
-    // ── Fetch Flourish data (needs SW fetch origin) ──
-
-    if (type === 'FETCH_FLOURISH_DATA') {
+    // Fetch Flourish data (needs SW fetch origin).
+    FETCH_FLOURISH_DATA: (message, _sender, sendResponse) => {
       const payload = message.payload as { visualizationId?: string } | undefined;
       const vizId = payload?.visualizationId;
       if (!vizId || !/^\d+$/.test(vizId)) {
@@ -231,9 +237,9 @@ export default defineBackground(() => {
         .then((data) => sendResponse({ data }))
         .catch((err: Error) => sendResponse({ error: err.message }));
       return true;
-    }
+    },
 
-    // ── Sidepanel: SW-routed authenticated login ──
+    // Sidepanel: SW-routed authenticated login.
     //
     // Runs in the service worker so credentials:'include' lands the host's
     // session cookie in Chrome's main cookie jar. That jar is shared across
@@ -241,8 +247,7 @@ export default defineBackground(() => {
     // API_FETCH calls and the offscreen SignalR connection inherit it
     // without needing a bearer token. SHA-512 pre-hash matches what the
     // BBWT3 SPA sends to /api/account/login.
-
-    if (type === 'AUTH_LOGIN') {
+    AUTH_LOGIN: (message, _sender, sendResponse) => {
       const p = (message.payload ?? {}) as { serverUrl: string; email: string; password: string };
       (async () => {
         try {
@@ -270,16 +275,15 @@ export default defineBackground(() => {
         }
       })();
       return true;
-    }
+    },
 
-    // ── Sidepanel: SW-routed authenticated API fetch ──
+    // Sidepanel: SW-routed authenticated API fetch.
     //
     // Generic wrapper used by the sidepanel for any host API call that needs
     // the session cookie. The cookie auto-attaches via credentials:'include'
     // because the SW (and Chrome's cookie jar) already holds it from
     // AUTH_LOGIN — no manual cookie forwarding needed.
-
-    if (type === 'API_FETCH') {
+    API_FETCH: (message, _sender, sendResponse) => {
       const p = (message.payload ?? {}) as {
         serverUrl: string;
         path: string;
@@ -322,12 +326,11 @@ export default defineBackground(() => {
         }
       })();
       return true;
-    }
+    },
 
-    // ── Frame registration ──
-
-    if (type === 'FRAME_REGISTER') {
-      const cs = sender as chrome.runtime.MessageSender;
+    // Frame registration.
+    FRAME_REGISTER: (_message, sender) => {
+      const cs = sender;
       const tabId = cs.tab?.id;
       if (!tabId) return;
       if (!frameRegistry.has(tabId)) frameRegistry.set(tabId, new Map());
@@ -335,10 +338,9 @@ export default defineBackground(() => {
         url: cs.url ?? '',
         isTop: (cs.frameId ?? 0) === 0,
       });
-      return;
-    }
+    },
 
-    if (type === 'SET_BATCH_SETTINGS') {
+    SET_BATCH_SETTINGS: (message) => {
       const p = (message.payload ?? {}) as {
         drainParallelCap?: number;
         preflightQuietMs?: number;
@@ -362,12 +364,10 @@ export default defineBackground(() => {
         chrome.storage.local.set({ notifyOnBatchComplete }).catch(() => {});
         console.warn('[SW] batch settings | notifyOnBatchComplete:', notifyOnBatchComplete);
       }
-      return;
-    }
+    },
 
-    // ── Inbound queue task: start or queue it ──
-
-    if (type === 'TASK_RECEIVED') {
+    // Inbound queue task: start or queue it.
+    TASK_RECEIVED: (message) => {
       const task = message.payload as QueueTask;
       // Resolve origin async so the same-origin gate has data to work with
       // during drain. Tasks without a resolvable URL get null origin and
@@ -387,10 +387,9 @@ export default defineBackground(() => {
         }
         scheduler.enqueueTask(task, origin);
       })();
-      return;
-    }
+    },
 
-    if (type === 'CDP_CLICK') {
+    CDP_CLICK: (message, sender, sendResponse) => {
       const p = (message.payload ?? {}) as { tabId?: number; x: number; y: number };
       const tabId = p.tabId ?? sender.tab?.id;
       if (!tabId) {
@@ -401,9 +400,9 @@ export default defineBackground(() => {
         .then((ok) => sendResponse({ ok }))
         .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
       return true;
-    }
+    },
 
-    if (type === 'CDP_MOUSE_MOVE') {
+    CDP_MOUSE_MOVE: (message, sender, sendResponse) => {
       const p = (message.payload ?? {}) as { tabId?: number; x: number; y: number };
       const tabId = p.tabId ?? sender.tab?.id;
       if (!tabId) {
@@ -414,9 +413,9 @@ export default defineBackground(() => {
         .then((ok) => sendResponse({ ok }))
         .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
       return true;
-    }
+    },
 
-    if (type === 'CDP_TYPE') {
+    CDP_TYPE: (message, sender, sendResponse) => {
       const p = (message.payload ?? {}) as { tabId?: number; text: string };
       const tabId = p.tabId ?? sender.tab?.id;
       if (!tabId || !p.text) {
@@ -427,9 +426,9 @@ export default defineBackground(() => {
         .then((ok) => sendResponse({ ok }))
         .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
       return true;
-    }
+    },
 
-    if (type === 'CDP_PRESS_KEY') {
+    CDP_PRESS_KEY: (message, sender, sendResponse) => {
       const p = (message.payload ?? {}) as { tabId?: number; key: string };
       const tabId = p.tabId ?? sender.tab?.id;
       if (!tabId || !p.key) {
@@ -440,11 +439,10 @@ export default defineBackground(() => {
         .then((ok) => sendResponse({ ok }))
         .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
       return true;
-    }
+    },
 
-    // ── Server-initiated task control (handled directly — no sidepanel required) ──
-
-    if (type === 'RESUME_TASK') {
+    // Server-initiated task control (handled directly — no sidepanel required).
+    RESUME_TASK: (message) => {
       const { taskId } = (message.payload ?? {}) as { taskId?: string };
       const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
       if (target) {
@@ -455,16 +453,53 @@ export default defineBackground(() => {
         chrome.notifications.clear(taskNotificationId(target.task.id)).catch(() => {});
         chrome.runtime.sendMessage({ type: 'TASK_RESUMED', payload: { taskId: target.task.id } }).catch(() => {});
       }
-      return;
-    }
+    },
 
-    // Sidepanel-driven resume. Intercept BEFORE the sidepanelToContent routing
-    // below so we can (1) clear pauseState atomically and (2) drain any
-    // held continuation that's been waiting because the page navigated during
-    // the pause. The interceptor doesn't consume the message — it falls through
-    // to the routing block, which forwards to the live content script (if one
-    // is still listening). If the content script is dead (page navigated), the
-    // drained continuation re-delivers EXECUTE_FLOW.
+    CANCEL_TASK: (message) => {
+      const { taskId } = (message.payload ?? {}) as { taskId?: string };
+      const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
+      if (target) {
+        browser.tabs.sendMessage(target.tabId, { type: 'ABORT_FLOW' })
+          .catch((err) => console.error('[SW] ABORT_FLOW failed:', err));
+      } else if (taskId) {
+        // May still be in pending — drop it without starting.
+        scheduler.cancelPending(taskId);
+      }
+    },
+
+    GET_PAUSE_STATE: (_message, _sender, sendResponse) => {
+      // Property name `pauseState` shadows the local variable in the value
+      // position — JS-legal, just looks like a self-reference.
+      sendResponse({ pauseState: pauseState.get() });
+    },
+
+    GET_QUEUE_SNAPSHOT: (_message, _sender, sendResponse) => {
+      sendResponse({
+        active: runner.snapshotActive(),
+        pending: [...scheduler.getPendingTasks()],
+        recent: [...scheduler.getRecent()],
+      });
+      return true;
+    },
+  };
+
+  browser.runtime.onMessage.addListener((
+    rawMessage: unknown,
+    rawSender: unknown,
+    sendResponse: (r: unknown) => void,
+  ) => {
+    const message = rawMessage as Record<string, unknown>;
+    const sender = rawSender as chrome.runtime.MessageSender;
+    const type = message.type as string;
+
+    // RESUME_AFTER_PAUSE intentionally falls through to the sidepanelToContent
+    // routing block below: its handler does pre-relay work (clear pause state,
+    // drain held continuations, route to the specific task tab when one
+    // matches), and then returns control so the standard active-tab routing
+    // can deliver the message to whatever live content script is listening.
+    // Kept outside the directHandlers map because that map's contract is
+    // "handler runs, dispatch ends" — RESUME_AFTER_PAUSE is the one type that
+    // breaks that contract.
     if (type === 'RESUME_AFTER_PAUSE') {
       const ps = pauseState.get();
       const wasPaused = ps !== null;
@@ -565,18 +600,11 @@ export default defineBackground(() => {
       // Fall through to sidepanelToContent routing for the live content script.
     }
 
-    if (type === 'CANCEL_TASK') {
-      const { taskId } = (message.payload ?? {}) as { taskId?: string };
-      const target = taskId ? scheduler.getActiveTask(taskId) : scheduler.getFirstActive();
-      if (target) {
-        browser.tabs.sendMessage(target.tabId, { type: 'ABORT_FLOW' })
-          .catch((err) => console.error('[SW] ABORT_FLOW failed:', err));
-      } else if (taskId) {
-        // May still be in pending — drop it without starting.
-        scheduler.cancelPending(taskId);
-      }
-      return;
-    }
+    // Direct dispatch. Map entries handle the bulk of message types — see
+    // `directHandlers` declaration above. Anything not matched here continues
+    // on to the allowlist-based relay sections below.
+    const handler = directHandlers[type];
+    if (handler) return handler(message, sender, sendResponse);
 
     // ── Offscreen → Sidepanel relay ──
 
@@ -586,22 +614,6 @@ export default defineBackground(() => {
     if (offscreenToSidepanel.includes(type)) {
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
       return;
-    }
-
-    if (type === 'GET_PAUSE_STATE') {
-      // Property name `pauseState` shadows the local variable in the value
-      // position — JS-legal, just looks like a self-reference.
-      sendResponse({ pauseState: pauseState.get() });
-      return;
-    }
-
-    if (type === 'GET_QUEUE_SNAPSHOT') {
-      sendResponse({
-        active: runner.snapshotActive(),
-        pending: [...scheduler.getPendingTasks()],
-        recent: [...scheduler.getRecent()],
-      });
-      return true;
     }
 
     // ── Sidepanel → Offscreen relay ──
