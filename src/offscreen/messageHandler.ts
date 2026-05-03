@@ -1,6 +1,7 @@
 import { ScraperHubConnection } from './signalrConnection';
 import type { SwToOffscreenMessage } from '../types/messages';
 import { dbg, ensureDebugInit } from '../utils/debugLog';
+import { HubServerMethods } from './hubMethodNames';
 
 const hub = new ScraperHubConnection();
 ensureDebugInit();
@@ -17,9 +18,9 @@ browser.runtime.onMessage.addListener(
     if (!message._fromSW) return;
     switch (message.type) {
       case 'INIT_SIGNALR': {
-        const { serverUrl, token, clientId, version } = message.payload;
+        const { serverUrl, clientId, version } = message.payload;
         hub
-          .connect(serverUrl, token, clientId, version)
+          .connect(serverUrl, clientId, version)
           .then(() => sendResponse({ ok: true }))
           .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
         return true as const;
@@ -34,22 +35,32 @@ browser.runtime.onMessage.addListener(
       }
 
       case 'SEND_TASK_PROGRESS':
-        hub.invoke('TaskProgress', message.payload).catch(console.error);
+        // Progress is high-frequency, fire-and-forget is acceptable.
+        hub.invoke(HubServerMethods.TaskProgress, message.payload).catch(console.error);
         sendResponse({ ok: true });
         return;
 
       case 'SEND_TASK_COMPLETE':
-        hub.invoke('TaskComplete', message.payload).catch(console.error);
-        sendResponse({ ok: true });
-        return;
+        // AWAIT the invoke. The SW relays this then immediately closes the scrape window
+        // (drainNextRemoteTask), which can drop the SignalR connection. If we ack the SW
+        // BEFORE the invoke flushes, the backend's HandleDisconnectAsync sees an in-flight
+        // RunItem and force-marks it Failed before TaskComplete arrives. Awaiting forces
+        // the SW to wait until the message is actually on the wire (and the server has
+        // ack'd) before tearing down the window.
+        hub.invoke(HubServerMethods.TaskComplete, message.payload)
+          .then(() => sendResponse({ ok: true }))
+          .catch((err) => { console.error(err); sendResponse({ ok: false, error: err.message }); });
+        return true as const;
 
       case 'SEND_TASK_ERROR':
-        hub.invoke('TaskError', message.payload).catch(console.error);
-        sendResponse({ ok: true });
-        return;
+        // Same race as TaskComplete — await before acking.
+        hub.invoke(HubServerMethods.TaskError, message.payload)
+          .then(() => sendResponse({ ok: true }))
+          .catch((err) => { console.error(err); sendResponse({ ok: false, error: err.message }); });
+        return true as const;
 
       case 'SEND_TASK_PAUSED':
-        hub.invoke('TaskPaused', message.payload).catch(console.error);
+        hub.invoke(HubServerMethods.TaskPaused, message.payload).catch(console.error);
         sendResponse({ ok: true });
         return;
 

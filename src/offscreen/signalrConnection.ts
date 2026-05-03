@@ -2,6 +2,15 @@ import * as signalR from '@microsoft/signalr';
 import type { QueueTask } from '../types/signalr';
 import type { ConnectionStatus } from '../types/messages';
 import { dbg } from '../utils/debugLog';
+import { HubServerMethods, HubClientEvents } from './hubMethodNames';
+
+// Retry policy for the SignalR connection. Tuned for transient network blips
+// (a few seconds of unreachability) without flooding the backend on prolonged
+// outages.
+const MAX_RETRIES = 5;
+const BASE_RETRY_MS = 1000;
+const MAX_RETRY_MS = 30_000;
+const RETRY_JITTER_MS = 500;
 
 export class ScraperHubConnection {
   private connection: signalR.HubConnection | null = null;
@@ -10,7 +19,7 @@ export class ScraperHubConnection {
   // Queued invocations while connecting/reconnecting, drained once Connected.
   private pendingInvocations: Array<{ method: string; args: unknown[] }> = [];
 
-  async connect(serverUrl: string, token: string, clientId: string, version: string): Promise<void> {
+  async connect(serverUrl: string, clientId: string, version: string): Promise<void> {
     this.extensionVersion = version;
     if (this.connection) {
       const s = this.connection.state;
@@ -31,26 +40,29 @@ export class ScraperHubConnection {
 
     this.connection = new signalR.HubConnectionBuilder()
       .withUrl(`${serverUrl}/api/scraper-hub`, {
-        accessTokenFactory: () => token,
+        // Cookie auth: the session cookie set by the SW's AUTH_LOGIN handler
+        // lives in Chrome's shared jar, which the offscreen document also
+        // sees. Both negotiate POST and WS upgrade ship the cookie.
+        withCredentials: true,
       })
       .withAutomaticReconnect({
         nextRetryDelayInMilliseconds: (ctx) => {
-          if (ctx.previousRetryCount >= 5) return null;
-          return Math.min(1000 * Math.pow(2, ctx.previousRetryCount) + Math.random() * 500, 30_000);
+          if (ctx.previousRetryCount >= MAX_RETRIES) return null;
+          return Math.min(BASE_RETRY_MS * Math.pow(2, ctx.previousRetryCount) + Math.random() * RETRY_JITTER_MS, MAX_RETRY_MS);
         },
       })
       .configureLogging(signalR.LogLevel.Warning)
       .build();
 
-    this.connection.on('ReceiveTask', (task: QueueTask) => {
+    this.connection.on(HubClientEvents.ReceiveTask, (task: QueueTask) => {
       browser.runtime.sendMessage({ type: 'TASK_RECEIVED', payload: task });
     });
 
-    this.connection.on('ResumeAfterPause', (taskId: string) => {
+    this.connection.on(HubClientEvents.ResumeAfterPause, (taskId: string) => {
       browser.runtime.sendMessage({ type: 'RESUME_TASK', payload: { taskId } });
     });
 
-    this.connection.on('CancelTask', (taskId: string) => {
+    this.connection.on(HubClientEvents.CancelTask, (taskId: string) => {
       browser.runtime.sendMessage({ type: 'CANCEL_TASK', payload: { taskId } });
     });
 
@@ -61,7 +73,7 @@ export class ScraperHubConnection {
     this.connection.onreconnected(() => {
       this.emitStatus('connected');
       this.connection!
-        .invoke('RegisterWorker', this.clientId, this.extensionVersion)
+        .invoke(HubServerMethods.RegisterWorker, this.clientId, this.extensionVersion)
         .catch((err) => console.error('[SignalR] RegisterWorker after reconnect failed:', err));
       this.drainPending();
     });
@@ -92,7 +104,7 @@ export class ScraperHubConnection {
 
     // RegisterWorker updates the backend DB — fire without blocking the connect promise.
     dbg('[SignalR] Invoking RegisterWorker', { clientId, version, state: this.connection.state });
-    this.connection.invoke('RegisterWorker', clientId, version)
+    this.connection.invoke(HubServerMethods.RegisterWorker, clientId, version)
       .then(() => dbg('[SignalR] RegisterWorker succeeded'))
       .catch((err) => {
         console.error('[SignalR] RegisterWorker failed:', err);

@@ -1,18 +1,10 @@
 import { dbg, ensureDebugInit } from '../utils/debugLog';
-import { mergeProgress } from '../utils/queueProgress';
 import type { QueueTask } from '../types/signalr';
-import { getAllConfigs, saveConfig, PREFS_KEY } from '../sidepanel/utils/storage';
-import { resolveQueueTask, ConfigNotFoundError } from '../background/remoteTaskHandler';
-import {
-  mapFlowProgress, mapFlowComplete, mapFlowError, mapFlowPaused,
-  type ActiveTaskContext, type FlowProgressPayload, type FlowCompletePayload,
-  type FlowErrorPayload, type FlowPausedPayload,
-} from '../background/flowEventToHubPayload';
+import { PREFS_KEY, getAllConfigs } from '../sidepanel/utils/storage';
 import { Scheduler, type PersistedActiveRecord } from '../background/scheduler';
 import { originOf } from '../background/originOf';
 import {
   attachIfNeeded as cdpAttach,
-  detach as cdpDetach,
   dispatchClick as cdpDispatchClick,
   dispatchMouseMove as cdpDispatchMouseMove,
   dispatchType as cdpDispatchType,
@@ -21,13 +13,16 @@ import {
   initCdpModule,
 } from '../background/cdpInput';
 import {
-  notifyTaskPaused,
-  notifyBatchComplete,
   isTaskNotification,
   isBatchNotification,
   taskIdFromNotificationId,
   taskNotificationId,
 } from '../background/notifications';
+import { createOffscreenManager, type SignalRConfig } from '../background/offscreen';
+import { createBadgeManager } from '../background/badge';
+import { createSessionPersistence } from '../background/sessionPersistence';
+import { createPauseStateManager } from '../background/pauseState';
+import { createRemoteTaskRunner, type RemoteTaskRunner } from '../background/remoteTaskRunner';
 
 export default defineBackground(() => {
   ensureDebugInit();
@@ -38,30 +33,37 @@ export default defineBackground(() => {
   const frameRegistry = new Map<number, Map<number, { url: string; isTop: boolean }>>();
   const pendingContinuations = new Map<number, unknown>();
   let lastFocusedTabId: number | null = null;
-  let offscreenCreated = false;
-  let offscreenReady = false;
-  const offscreenReadyResolvers: Array<() => void> = [];
 
-  function waitForOffscreenReady(): Promise<void> {
-    if (offscreenReady) return Promise.resolve();
-    return new Promise(resolve => offscreenReadyResolvers.push(resolve));
-  }
+  // Note: offscreen manager closes over a getter for signalrConfig so it always
+  // reads the latest value (signalrConfig is mutated when INIT_SIGNALR arrives
+  // from the sidepanel). A snapshot would go stale across SW lifetime.
+  const offscreen = createOffscreenManager({ getSignalrConfig: () => signalrConfig });
+  const badge = createBadgeManager();
+  const pauseState = createPauseStateManager();
 
   // ── Remote queue state ──
   //
   // Scheduler owns the per-task records (active Map, pending queue, recent
-  // history, single-flight `starting` gate). `activePauseState` is kept as a
-  // thin singleton mirror for the App.tsx GET_PAUSE_STATE handshake, the
-  // continuation-hold check in tabs.onUpdated, and sidepanel-only-mode runs
-  // (which bypass the scheduler). PR4 will move pause state per-task.
+  // history, single-flight `starting` gate). The remote-task runner owns the
+  // start/drain/flow-event lifecycle. `pauseState` is the singleton "is the
+  // active task paused?" mirror — read here in the message router (for the
+  // GET_PAUSE_STATE handshake and the continuation-hold check in
+  // tabs.onUpdated) and inside the runner. PR4 will move pause state per-task.
+
+  // Late binding: `runner` is constructed below (after scheduler + persistence,
+  // because the runner depends on both). The Scheduler's startTask callback
+  // captures the binding lazily — by the time a task is actually dispatched,
+  // `runner` has been populated. Cast via `null!` is the simplest escape from
+  // TS's strict-init complaint without loosening the file-wide tsconfig.
+  let runner: RemoteTaskRunner = null!;
 
   const scheduler = new Scheduler({
     startTask: (task) => {
-      // startRemoteTask handles its own resolver/window-create failures via
+      // runner.start handles its own resolver/window-create failures via
       // scheduler.recordStartFailed. The .catch here is a backstop for
       // unforeseen rejections from chrome APIs that escape those handlers —
       // matches HEAD's defensive logging pattern.
-      startRemoteTask(task).catch((err) => console.error('[SW] startRemoteTask failed:', err));
+      runner.start(task).catch((err) => console.error('[SW] runner.start failed:', err));
     },
     broadcastResumeForDrain: (records) => {
       for (const r of records) {
@@ -76,13 +78,8 @@ export default defineBackground(() => {
     },
   });
 
-  let activePauseState: {
-    reason: 'cloudflare' | 'awaitUserAction';
-    message?: string;
-    trigger?: import('../types/messages').DetectionTrigger;
-    domain?: string;
-  } | null = null;
-  type SignalRConfig = { serverUrl: string; token: string; clientId: string; version: string };
+  const persistence = createSessionPersistence({ scheduler });
+
   let signalrConfig: SignalRConfig | null = null;
 
   // PR6 — notification toggles. Hydrated from chrome.storage.local on SW
@@ -90,32 +87,21 @@ export default defineBackground(() => {
   let notifyOnPause = true;
   let notifyOnBatchComplete = true;
 
-  // PR6 — accumulated stats for the current batch. Reset on transition to
-  // idle (after firing the batch-complete notification). Counts FLOW_COMPLETE
-  // as succeeded; FLOW_ERROR and tab-closed-mid-task as failed.
-  const batchStats = { total: 0, succeeded: 0, failed: 0 };
+  runner = createRemoteTaskRunner({
+    scheduler,
+    offscreen,
+    badge,
+    persistence,
+    pauseState,
+    getNotifyOnPause: () => notifyOnPause,
+    getNotifyOnBatchComplete: () => notifyOnBatchComplete,
+    setLastFocusedTabId: (id) => { lastFocusedTabId = id; },
+    isDebugMode,
+  });
 
   // Badge "!" while any task is paused. Cleared when the last paused task
   // resumes or completes. Badge background uses the warning token from
   // index.css (--warning #F57F17) so the chip is visually consistent.
-  const pausedTaskIds = new Set<string>();
-
-  function refreshBadge(): void {
-    if (pausedTaskIds.size > 0) {
-      chrome.action.setBadgeText({ text: '!' }).catch(() => {});
-      chrome.action.setBadgeBackgroundColor({ color: '#F57F17' }).catch(() => {});
-    } else {
-      chrome.action.setBadgeText({ text: '' }).catch(() => {});
-    }
-  }
-
-  function persistActive(): void {
-    chrome.storage.session.set({ activeRemoteTasks: scheduler.serializeActive() }).catch(() => {});
-  }
-
-  function persistRecent(): void {
-    chrome.storage.session.set({ recentRemoteTasks: scheduler.getRecent() }).catch(() => {});
-  }
 
   // Restore state from session storage on SW restart (state is lost when SW is killed by Chrome).
   chrome.storage.session.get(['signalrConfig', 'activeRemoteTasks', 'recentRemoteTasks']).then((data: Record<string, unknown>) => {
@@ -141,7 +127,7 @@ export default defineBackground(() => {
   chrome.storage.session.remove('activeRemoteTask').catch(() => {});
 
   // Debug-mode flag (mirrors the toggle read by scrapingEngine.ts). Read
-  // fresh at decision time inside drainNextRemoteTask — caching it at SW
+  // fresh at decision time inside runner.drainNext — caching it at SW
   // startup races with FLOW_COMPLETE on a freshly woken SW.
   async function isDebugMode(): Promise<boolean> {
     try {
@@ -151,43 +137,6 @@ export default defineBackground(() => {
     } catch {
       return false;
     }
-  }
-
-  // ── Offscreen document (Chrome-only) ──
-
-  async function ensureOffscreen(): Promise<void> {
-    if (offscreenCreated) return;
-    const offscreen = (chrome as unknown as { offscreen?: {
-      hasDocument: () => Promise<boolean>;
-      createDocument: (opts: { url: string; reasons: string[]; justification: string }) => Promise<void>;
-      Reason: Record<string, string>;
-    } }).offscreen;
-    if (!offscreen) return; // Firefox: no offscreen support
-    const hasDoc = await offscreen.hasDocument();
-    if (!hasDoc) {
-      await offscreen.createDocument({
-        url: browser.runtime.getURL('/offscreen.html'),
-        reasons: [offscreen.Reason.BLOBS],
-        justification: 'Maintain SignalR WebSocket connection for task queue',
-      });
-      // After OFFSCREEN_READY fires, auto-reinitialize SignalR if we have stored config.
-      // This handles the case where the SW was killed mid-scrape and the offscreen doc
-      // was also killed — we need to reconnect before flow events can be relayed.
-      if (signalrConfig) {
-        waitForOffscreenReady().then(() => {
-          browser.runtime.sendMessage({
-            type: 'INIT_SIGNALR',
-            payload: signalrConfig,
-            _fromSW: true,
-          }).catch(() => {});
-        }).catch(() => {});
-      }
-    } else {
-      // SW restarted but offscreen persists — listener is already registered
-      offscreenReady = true;
-      offscreenReadyResolvers.splice(0).forEach(r => r());
-    }
-    offscreenCreated = true;
   }
 
   // ── Install: inject content scripts into existing tabs ──
@@ -222,288 +171,6 @@ export default defineBackground(() => {
     lastFocusedTabId = tabId;
   });
 
-  // ── Remote task helpers ──
-
-  function waitForTabComplete(tabId: number): Promise<void> {
-    return new Promise((resolve) => {
-      const listener = (id: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-        if (id === tabId && changeInfo.status === 'complete') {
-          browser.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-      browser.tabs.onUpdated.addListener(listener);
-      browser.tabs.get(tabId).then((t) => {
-        if (t.status === 'complete') {
-          browser.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      }).catch(() => { /* tab gone */ });
-    });
-  }
-
-  function relayHubInvocation(type: string, payload: unknown): void {
-    const send = async () => {
-      await ensureOffscreen();
-      await waitForOffscreenReady();
-      dbg('[SW] relayHubInvocation sending:', type);
-      const resp = await browser.runtime.sendMessage({ type, payload, _fromSW: true });
-      dbg('[SW] relayHubInvocation sent ok:', type);
-    };
-    send().catch((err) => console.error('[SW] Failed to relay hub invocation:', type, err));
-  }
-
-  function buildSnapshotActiveTask(): QueueTask | null {
-    const r = scheduler.getFirstActive();
-    if (!r) return null;
-    return {
-      ...r.task,
-      status: activePauseState ? 'paused' : 'running',
-      pausedReason: activePauseState?.reason,
-      progress: r.lastProgress,
-    };
-  }
-
-  async function startRemoteTask(task: QueueTask): Promise<void> {
-    let resolved;
-    try {
-      const localConfigs = await getAllConfigs();
-      resolved = resolveQueueTask(task, localConfigs);
-
-      // Persist inline config if it isn't local yet — first-run cache.
-      if (task.inlineConfig && !localConfigs.some((c) => c.id === task.configId)) {
-        await saveConfig(task.inlineConfig);
-      }
-    } catch (err) {
-      const message = err instanceof ConfigNotFoundError ? err.message : (err as Error).message;
-      relayHubInvocation('SEND_TASK_ERROR', {
-        taskId: task.id,
-        configId: task.configId,
-        error: message,
-        failedAt: new Date().toISOString(),
-      });
-      scheduler.recordStartFailed(task.id);
-      return;
-    }
-
-    // Cascade: each new task window opens at a 40px staircase offset so
-    // no window is ever fully occluded by another. Chrome's occlusion
-    // detection freezes tabs that are 100% covered for a few seconds;
-    // a sliver of visible pixels is enough to keep them running.
-    const offset = scheduler.getActiveCount() * 40;
-    const win = await browser.windows.create({
-      url: resolved.config.url,
-      focused: true,
-      left: 100 + offset,
-      top: 50 + offset,
-      width: 1280,
-      height: 800,
-    });
-    const tab = win?.tabs?.[0];
-    if (!tab?.id || !win?.id) {
-      relayHubInvocation('SEND_TASK_ERROR', {
-        taskId: task.id,
-        configId: task.configId,
-        error: "Couldn't open a window for the task",
-        failedAt: new Date().toISOString(),
-      });
-      scheduler.recordStartFailed(task.id);
-      return;
-    }
-
-    // Register early so tabs.onRemoved during page load can identify the task.
-    scheduler.recordStarted(task.id, task, {
-      tabId: tab.id,
-      windowId: win.id,
-      origin: originOf(resolved.config.url),
-      resolvedDataMapping: resolved.config.dataMapping,
-    });
-    persistActive();
-    lastFocusedTabId = tab.id;
-
-    // CDP attach (best-effort; falls through to synthetic if pref off
-    // or permission missing). Detached on FLOW_PAUSED + flow end.
-    await cdpAttach(tab.id).catch((err: Error) => {
-      console.warn('[SW] cdpAttach failed (synthetic fallback):', err.message);
-    });
-
-    await waitForTabComplete(tab.id);
-
-    console.warn('[SW] Sending initial EXECUTE_FLOW | taskId:', resolved.taskId, '| searchTerms:', resolved.searchTerms);
-    browser.tabs.sendMessage(tab.id, {
-      type: 'EXECUTE_FLOW',
-      payload: {
-        config: resolved.config,
-        searchTerms: resolved.searchTerms,
-        inputRows: resolved.inputRows,
-        taskId: resolved.taskId,
-        drainResumed: false, // initial send — task just started
-      },
-    }).catch((err: Error) => {
-      relayHubInvocation('SEND_TASK_ERROR', {
-        taskId: resolved.taskId,
-        configId: resolved.configId,
-        error: `Couldn't dispatch task to page: ${err.message}`,
-        failedAt: new Date().toISOString(),
-      });
-      drainNextRemoteTask(resolved.taskId, 'failed');
-    });
-  }
-
-  // PR2: now requires the taskId — we no longer have a hidden singleton to drain.
-  // Callers that previously called drainNextRemoteTask() with no args (catastrophic
-  // failures during start) now use scheduler.recordStartFailed instead, since at
-  // start-time there is no scheduler record yet to remove.
-  function drainNextRemoteTask(taskId: string, completedStatus: 'completed' | 'failed' = 'failed'): void {
-    activePauseState = null;
-    // Symmetric cleanup: a task that ends (completed, failed, or window
-    // closed) cannot be in a paused state any more.
-    pausedTaskIds.delete(taskId);
-    refreshBadge();
-    chrome.notifications.clear(taskNotificationId(taskId)).catch(() => {});
-    // PR6-fix — capture the scheduler phase BEFORE endTask runs (which may
-    // transition us to idle). The previous prevSchedulerPhase tracker
-    // started at 'idle' and never saw the intermediate preflight/drain
-    // states, so the batch-complete check always failed.
-    const phaseBefore = scheduler.getPhase();
-    const closing = scheduler.endTask(taskId);
-    if (!closing) {
-      // No record — nothing to clean up. tryStartNext is already a no-op when
-      // active < cap and pending is empty, so we don't need to call it here.
-      return;
-    }
-    cdpDetach(closing.tabId).catch(() => { /* best effort */ });
-    scheduler.pushRecent({ ...closing.task, status: completedStatus, pausedReason: undefined });
-    persistActive();
-    persistRecent();
-
-    // PR6 — accumulate batch stats for the eventual batch-complete notification.
-    batchStats.total++;
-    if (completedStatus === 'completed') batchStats.succeeded++;
-    else batchStats.failed++;
-
-    // PR6 — detect batch-complete: this endTask transitioned us out of
-    // active work (any non-idle phase → idle). Fire notification + reset.
-    const phaseAfter = scheduler.getPhase();
-    if (phaseAfter === 'idle' && phaseBefore !== 'idle' && batchStats.total > 0) {
-      console.warn('[SW] batch complete | stats:', batchStats, '| notifyOnBatchComplete:', notifyOnBatchComplete);
-      if (notifyOnBatchComplete) {
-        notifyBatchComplete({ ...batchStats });
-      }
-      batchStats.total = 0;
-      batchStats.succeeded = 0;
-      batchStats.failed = 0;
-    }
-
-    const closingWindowId = closing.windowId;
-    const closingTaskId = closing.task.id;
-    isDebugMode().then((debug) => {
-      if (debug) {
-        console.warn('[SW] DEBUG mode — leaving task window open | windowId:', closingWindowId, '| taskId:', closingTaskId);
-      } else {
-        browser.windows.remove(closingWindowId).catch(() => {});
-      }
-    }).catch(() => {
-      browser.windows.remove(closingWindowId).catch(() => {});
-    });
-  }
-
-  function handleRemoteFlowEvent(type: string, payload: Record<string, unknown>): void {
-    const taskId = payload?.taskId as string | undefined;
-    if (!taskId) {
-      // Sidepanel-mode runs (no taskId) — handled elsewhere or not relevant
-      // to the queue path. Silently ignore.
-      return;
-    }
-    const record = scheduler.getActiveTask(taskId);
-    if (!record) {
-      console.warn('[SW] handleRemoteFlowEvent: no record for taskId', taskId, 'dropping', type);
-      return;
-    }
-
-    const ctx: ActiveTaskContext = {
-      taskId: record.task.id,
-      configId: record.task.configId,
-      configName: record.task.configName,
-      searchTerms: record.task.searchTerms,
-      dataMapping: record.resolvedDataMapping,
-    };
-
-    switch (type) {
-      case 'FLOW_PROGRESS': {
-        const hubPayload = mapFlowProgress(ctx, payload as unknown as FlowProgressPayload);
-        relayHubInvocation('SEND_TASK_PROGRESS', hubPayload);
-        const merged = mergeProgress(record.lastProgress ?? null, {
-          stepLabel: (payload as Record<string, unknown>).stepLabel,
-          termIndex: (payload as Record<string, unknown>).termIndex,
-        });
-        if (merged) {
-          scheduler.setProgress(taskId, merged);
-          persistActive();
-        }
-        return;
-      }
-      case 'FLOW_COMPLETE': {
-        const fp = payload as unknown as FlowCompletePayload;
-        console.warn('[SW] FLOW_COMPLETE | taskId:', record.task.id, '| aborted:', fp.result?.aborted, '| iterations:', fp.result?.iterations?.length, '| totalTimeMs:', fp.result?.totalTimeMs);
-        const hubPayload = mapFlowComplete(ctx, fp);
-        relayHubInvocation('SEND_TASK_COMPLETE', hubPayload);
-        drainNextRemoteTask(taskId, 'completed');
-        return;
-      }
-      case 'FLOW_ERROR': {
-        const fe = payload as unknown as FlowErrorPayload;
-        console.warn('[SW] FLOW_ERROR | taskId:', record.task.id, '| error:', fe.error);
-        const hubPayload = mapFlowError(ctx, fe);
-        relayHubInvocation('SEND_TASK_ERROR', hubPayload);
-        drainNextRemoteTask(taskId, 'failed');
-        return;
-      }
-      case 'FLOW_PAUSED': {
-        const flowPayload = payload as { reason?: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string };
-        console.warn('[SW] FLOW_PAUSED | taskId:', record.task.id, '| reason:', flowPayload.reason, '| message:', flowPayload.message, '| trigger:', flowPayload.trigger, '| domain:', flowPayload.domain);
-        if (flowPayload.reason !== 'cloudflare' && flowPayload.reason !== 'awaitUserAction') return;
-        activePauseState = {
-          reason: flowPayload.reason as 'cloudflare' | 'awaitUserAction',
-          message: flowPayload.message,
-          trigger: flowPayload.trigger,
-          domain: flowPayload.domain,
-        };
-        // Detach CDP during user-solves-the-challenge phase so the page's
-        // iframe (e.g. Cloudflare) doesn't fingerprint our debugger while
-        // the user is genuinely solving. Re-attached on RESUME_AFTER_PAUSE.
-        cdpDetach(record.tabId).catch(() => { /* best effort */ });
-        const hubPayload = mapFlowPaused(ctx, payload as unknown as FlowPausedPayload);
-        relayHubInvocation('SEND_TASK_PAUSED', hubPayload);
-
-        // Badge "!" + taskbar attention as persistent / OS-level signals.
-        // Survive notification suppression (Focus Assist) and unfocused
-        // task windows.
-        pausedTaskIds.add(record.task.id);
-        refreshBadge();
-        chrome.windows.update(record.windowId, { drawAttention: true }).catch(() => {});
-
-        // Fire a Chrome notification when:
-        //   - notifyOnPause toggle is on
-        //   - the focused window is NOT this task's window
-        // (Previously also gated on phase === 'drain'; relaxed because new
-        // task windows open `focused: true` then immediately lose focus to
-        // the next window in a parallel batch — preflight pauses on
-        // already-backgrounded windows now notify correctly.)
-        if (notifyOnPause) {
-          const target = record;
-          chrome.windows.getLastFocused().then((focusedWindow) => {
-            if (!focusedWindow || focusedWindow.id !== target.windowId) {
-              const msg = flowPayload.message ?? 'Action needed in your browser.';
-              notifyTaskPaused(target, msg);
-            }
-          }).catch(() => { /* getLastFocused failed — skip notification */ });
-        }
-        return;
-      }
-    }
-  }
-
   // ── Message routing ──
 
   browser.runtime.onMessage.addListener((
@@ -516,8 +183,7 @@ export default defineBackground(() => {
     const type = message.type as string;
 
     if (type === 'OFFSCREEN_READY') {
-      offscreenReady = true;
-      offscreenReadyResolvers.splice(0).forEach(r => r());
+      offscreen.markReady();
       return;
     }
 
@@ -564,6 +230,97 @@ export default defineBackground(() => {
         })
         .then((data) => sendResponse({ data }))
         .catch((err: Error) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    // ── Sidepanel: SW-routed authenticated login ──
+    //
+    // Runs in the service worker so credentials:'include' lands the host's
+    // session cookie in Chrome's main cookie jar. That jar is shared across
+    // all extension contexts (sidepanel, SW, offscreen) — subsequent
+    // API_FETCH calls and the offscreen SignalR connection inherit it
+    // without needing a bearer token. SHA-512 pre-hash matches what the
+    // BBWT3 SPA sends to /api/account/login.
+
+    if (type === 'AUTH_LOGIN') {
+      const p = (message.payload ?? {}) as { serverUrl: string; email: string; password: string };
+      (async () => {
+        try {
+          const pwBytes = new TextEncoder().encode(p.password);
+          const pwHash = await crypto.subtle.digest('SHA-512', pwBytes);
+          const pwHex = Array.from(new Uint8Array(pwHash))
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('');
+
+          const res = await fetch(`${p.serverUrl}/api/account/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email: p.email, password: pwHex }),
+          });
+
+          if (!res.ok) {
+            const code = res.status === 401 ? 'invalid_credentials' : 'login_failed';
+            sendResponse({ ok: false, error: code, status: res.status });
+            return;
+          }
+          sendResponse({ ok: true });
+        } catch (err) {
+          sendResponse({ ok: false, error: 'network_error', message: (err as Error).message });
+        }
+      })();
+      return true;
+    }
+
+    // ── Sidepanel: SW-routed authenticated API fetch ──
+    //
+    // Generic wrapper used by the sidepanel for any host API call that needs
+    // the session cookie. The cookie auto-attaches via credentials:'include'
+    // because the SW (and Chrome's cookie jar) already holds it from
+    // AUTH_LOGIN — no manual cookie forwarding needed.
+
+    if (type === 'API_FETCH') {
+      const p = (message.payload ?? {}) as {
+        serverUrl: string;
+        path: string;
+        options?: RequestInit;
+      };
+      (async () => {
+        try {
+          // BBWT3 enables AutoValidateAntiforgeryTokenAttribute globally, so
+          // non-GET requests need the XSRF-TOKEN cookie value mirrored as the
+          // X-XSRF-TOKEN header. Mirrors what the host SPA's HttpClient
+          // interceptor does. GET requests are not antiforgery-protected.
+          const method = (p.options?.method ?? 'GET').toUpperCase();
+          const xsrfHeader: Record<string, string> = {};
+          if (method !== 'GET' && method !== 'HEAD') {
+            try {
+              const cookie = await chrome.cookies.get({ url: p.serverUrl, name: 'XSRF-TOKEN' });
+              if (cookie?.value) xsrfHeader['X-XSRF-TOKEN'] = decodeURIComponent(cookie.value);
+            } catch { /* best effort — backend will 400 if missing and required */ }
+          }
+          const res = await fetch(`${p.serverUrl}${p.path}`, {
+            ...p.options,
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              ...xsrfHeader,
+              ...(p.options?.headers ?? {}),
+            },
+          });
+          if (!res.ok) {
+            sendResponse({ ok: false, error: `Request failed: ${res.status}`, status: res.status });
+            return;
+          }
+          // Some endpoints (e.g. logout) return no body. Try JSON first,
+          // fall back to null.
+          const text = await res.text();
+          const data = text ? JSON.parse(text) : null;
+          sendResponse({ ok: true, data });
+        } catch (err) {
+          sendResponse({ ok: false, error: (err as Error).message });
+        }
+      })();
       return true;
     }
 
@@ -693,9 +450,8 @@ export default defineBackground(() => {
       if (target) {
         browser.tabs.sendMessage(target.tabId, { type: 'RESUME_AFTER_PAUSE' })
           .catch((err) => console.error('[SW] RESUME_AFTER_PAUSE failed:', err));
-        activePauseState = null;
-        pausedTaskIds.delete(target.task.id);
-        refreshBadge();
+        pauseState.clear();
+        badge.markUnpaused(target.task.id);
         chrome.notifications.clear(taskNotificationId(target.task.id)).catch(() => {});
         chrome.runtime.sendMessage({ type: 'TASK_RESUMED', payload: { taskId: target.task.id } }).catch(() => {});
       }
@@ -703,25 +459,26 @@ export default defineBackground(() => {
     }
 
     // Sidepanel-driven resume. Intercept BEFORE the sidepanelToContent routing
-    // below so we can (1) clear activePauseState atomically and (2) drain any
+    // below so we can (1) clear pauseState atomically and (2) drain any
     // held continuation that's been waiting because the page navigated during
     // the pause. The interceptor doesn't consume the message — it falls through
     // to the routing block, which forwards to the live content script (if one
     // is still listening). If the content script is dead (page navigated), the
     // drained continuation re-delivers EXECUTE_FLOW.
     if (type === 'RESUME_AFTER_PAUSE') {
-      const wasPaused = activePauseState !== null;
+      const ps = pauseState.get();
+      const wasPaused = ps !== null;
       const resumePayload = (message.payload ?? {}) as { taskId?: string; markAsFalseAlarm?: boolean };
 
-      // Capture false-alarm signal BEFORE clearing activePauseState.
+      // Capture false-alarm signal BEFORE clearing pauseState.
       // Cloudflare cannot be marked as false alarm (UI doesn't expose the button).
       if (
         resumePayload.markAsFalseAlarm
-        && activePauseState?.reason === 'awaitUserAction'
-        && activePauseState?.trigger
-        && activePauseState?.domain
+        && ps?.reason === 'awaitUserAction'
+        && ps?.trigger
+        && ps?.domain
       ) {
-        const { domain, trigger } = activePauseState;
+        const { domain, trigger } = ps;
         // Async fire-and-forget; don't block the resume on storage write.
         import('../sidepanel/utils/detectionMemory').then(({ addIgnoredTrigger }) => {
           addIgnoredTrigger(domain, trigger).catch((err) => {
@@ -731,14 +488,13 @@ export default defineBackground(() => {
         });
       }
 
-      activePauseState = null;
+      pauseState.clear();
       // Clear pause UI signals: drop this taskId from the paused set, refresh
       // badge (clears if no other pauses), and clear any pending notification
       // for this task. Safe to call when no notification was fired — clear()
       // is idempotent.
       if (resumePayload.taskId) {
-        pausedTaskIds.delete(resumePayload.taskId);
-        refreshBadge();
+        badge.markUnpaused(resumePayload.taskId);
         chrome.notifications.clear(taskNotificationId(resumePayload.taskId)).catch(() => {});
         // Notify the sidepanel so it clears the ribbon regardless of which
         // surface (in-page banner or sidepanel button) triggered the resume.
@@ -833,13 +589,15 @@ export default defineBackground(() => {
     }
 
     if (type === 'GET_PAUSE_STATE') {
-      sendResponse({ pauseState: activePauseState });
+      // Property name `pauseState` shadows the local variable in the value
+      // position — JS-legal, just looks like a self-reference.
+      sendResponse({ pauseState: pauseState.get() });
       return;
     }
 
     if (type === 'GET_QUEUE_SNAPSHOT') {
       sendResponse({
-        active: buildSnapshotActiveTask(),
+        active: runner.snapshotActive(),
         pending: [...scheduler.getPendingTasks()],
         recent: [...scheduler.getRecent()],
       });
@@ -867,8 +625,8 @@ export default defineBackground(() => {
         chrome.storage.session.remove('signalrConfig').catch(() => {});
       }
       const relay = async () => {
-        await ensureOffscreen();
-        await waitForOffscreenReady();
+        await offscreen.ensure();
+        await offscreen.waitForReady();
         // Tag the relay so the offscreen can ignore direct sidepanel broadcasts
         // of the same message (runtime.sendMessage is a broadcast to all contexts).
         return browser.runtime.sendMessage({ ...(message as object), _fromSW: true });
@@ -911,25 +669,25 @@ export default defineBackground(() => {
       }
       browser.runtime.sendMessage(message).catch(() => { /* sidepanel may not be open */ });
 
-      // Mirror pause state into activePauseState for sidepanel-only runs.
-      // handleRemoteFlowEvent below also sets it but only when there is an active
-      // queue-mode record. Both paths converge on the same activePauseState.
+      // Mirror pause state for sidepanel-only runs. runner.handleFlowEvent
+      // below also sets it but only when there is an active queue-mode
+      // record. Both paths converge on the same pauseState manager.
       if (type === 'FLOW_PAUSED') {
         const fp = (message.payload ?? {}) as { reason?: string; message?: string; trigger?: import('../types/messages').DetectionTrigger; domain?: string };
         if (fp.reason === 'cloudflare' || fp.reason === 'awaitUserAction') {
-          activePauseState = {
+          pauseState.set({
             reason: fp.reason as 'cloudflare' | 'awaitUserAction',
             message: fp.message,
             trigger: fp.trigger,
             domain: fp.domain,
-          };
+          });
         }
       }
       if (type === 'FLOW_RESUMED') {
-        activePauseState = null;
+        pauseState.clear();
       }
 
-      handleRemoteFlowEvent(type, (message.payload ?? {}) as Record<string, unknown>);
+      runner.handleFlowEvent(type, (message.payload ?? {}) as Record<string, unknown>);
       return;
     }
 
@@ -984,13 +742,13 @@ export default defineBackground(() => {
     pendingContinuations.delete(tabId);
     const orphaned = scheduler.findByTabId(tabId);
     if (orphaned) {
-      relayHubInvocation('SEND_TASK_ERROR', {
+      runner.relayHubInvocation('SEND_TASK_ERROR', {
         taskId: orphaned.task.id,
         configId: orphaned.task.configId,
         error: 'Task tab was closed',
         failedAt: new Date().toISOString(),
       });
-      drainNextRemoteTask(orphaned.task.id, 'failed');
+      runner.drainNext(orphaned.task.id, 'failed');
     }
   });
 
@@ -1002,13 +760,14 @@ export default defineBackground(() => {
       const continuation = pendingContinuations.get(tabId);
       if (continuation) {
         const cp = continuation as Record<string, unknown>;
-        // Pause-resilience: while activePauseState is set, the user is still
+        // Pause-resilience: while pauseState is set, the user is still
         // working on the obstacle. The page may have navigated as part of that
         // (e.g. login submit redirect). HOLD the continuation in the map and
         // do NOT deliver — it will be drained by the sidepanel-resume handler
         // when the user clicks Continue.
-        if (activePauseState) {
-          console.warn('[SW] tabs.onUpdated — holding continuation (pause active) | tabId:', tabId, '| reason:', activePauseState.reason);
+        const ps = pauseState.get();
+        if (ps) {
+          console.warn('[SW] tabs.onUpdated — holding continuation (pause active) | tabId:', tabId, '| reason:', ps.reason);
           return;
         }
 
